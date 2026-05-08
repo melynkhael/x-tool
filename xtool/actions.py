@@ -141,7 +141,11 @@ ACTIONS: dict[str, Action] = {
         gone_markers=("not found", "no status found"),
     ),
     "unretweet": Action(
-        name="UnretweetTweet",
+        # Modern X web client (May 2026) uses DeleteRetweet, not the
+        # older UnretweetTweet. UnretweetTweet still exists as a query
+        # id in the discovery table for backcompat but is no longer in
+        # the live schema and returns HTTP 422 GRAPHQL_VALIDATION_FAILED.
+        name="DeleteRetweet",
         build_variables=lambda tid: {
             "source_tweet_id": str(tid),
             "dark_request": False,
@@ -474,10 +478,11 @@ def bulk_action(
 
             stats.attempted += 1
             outcome = "dry-run"
+            detail: str | None = None
 
             if not dry_run:
                 assert session is not None
-                outcome = _attempt(session, action, tid, qid, max_retries)
+                outcome, detail = _attempt(session, action, tid, qid, max_retries)
                 if outcome == action.past_tense:
                     stats.succeeded += 1
                 elif outcome == action.gone_tense:
@@ -486,17 +491,15 @@ def bulk_action(
                     # Credentials are bad; aborting rather than burning
                     # through the list.
                     stats.failed += 1
-                    log_fh.write(
-                        json.dumps(
-                            {
-                                "id": tid,
-                                "action": _action_key(action),
-                                "outcome": outcome,
-                                "ts": time.time(),
-                            }
-                        )
-                        + "\n"
-                    )
+                    rec = {
+                        "id": tid,
+                        "action": _action_key(action),
+                        "outcome": outcome,
+                        "ts": time.time(),
+                    }
+                    if detail:
+                        rec["error"] = detail
+                    log_fh.write(json.dumps(rec) + "\n")
                     log_fh.flush()
                     if on_progress:
                         on_progress(stats, tid, outcome)
@@ -507,17 +510,15 @@ def bulk_action(
                 else:
                     stats.failed += 1
 
-            log_fh.write(
-                json.dumps(
-                    {
-                        "id": tid,
-                        "action": _action_key(action),
-                        "outcome": outcome,
-                        "ts": time.time(),
-                    }
-                )
-                + "\n"
-            )
+            rec = {
+                "id": tid,
+                "action": _action_key(action),
+                "outcome": outcome,
+                "ts": time.time(),
+            }
+            if detail:
+                rec["error"] = detail
+            log_fh.write(json.dumps(rec) + "\n")
             log_fh.flush()
 
             if on_progress:
@@ -542,8 +543,12 @@ def _attempt(
     tid: str,
     qid: str,
     max_retries: int,
-) -> str:
+) -> tuple[str, str | None]:
     """Single-id retry loop.
+
+    Returns ``(outcome, detail)``. ``detail`` is None for success/gone,
+    or a short string describing the last failure for bulk_action to
+    record in the progress log.
 
     * Rate limits: sleep until ``x-rate-limit-reset`` (clamped to [5s, 15m])
       if the header is present, otherwise exponential back-off.
@@ -552,11 +557,14 @@ def _attempt(
     * Transient network/5xx errors are retried with a short back-off.
     """
     delay = 5.0
+    last_error: str | None = None
     for attempt in range(max_retries):
         try:
             body = perform_action(session, action, tid, query_id=qid)
-            return action.gone_tense if body.get("already_gone") else action.past_tense
+            outcome = action.gone_tense if body.get("already_gone") else action.past_tense
+            return outcome, None
         except RateLimited as rl:
+            last_error = f"rate limited (reset={rl.reset_epoch:.0f})"
             if rl.reset_epoch:
                 wait = max(5.0, min(rl.reset_epoch - time.time() + 1.0, 900.0))
             else:
@@ -565,14 +573,15 @@ def _attempt(
             time.sleep(wait)
         except ActionError as exc:
             msg = str(exc)
+            last_error = msg[:500]
             # Auth failures: stop trying so we don't hammer with bad
             # cookies. Surface via 'failed' outcome; CLI will abort.
             if "authentication rejected" in msg:
-                return "auth_failed"
+                return "auth_failed", last_error
             # Transient network/5xx: retry with a small back-off.
             if "network error" in msg or "HTTP 5" in msg:
                 time.sleep(delay)
                 delay = min(delay * 2, 60.0)
                 continue
-            return "failed"
-    return "failed"
+            return "failed", last_error
+    return "failed", last_error or "exhausted retries"

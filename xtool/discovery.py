@@ -46,7 +46,7 @@ FALLBACK_QUERY_IDS: dict[str, str] = {
 # Operation names xtool actually uses. Only these must be resolvable.
 REQUIRED_OPERATIONS: tuple[str, ...] = (
     "DeleteTweet",
-    "UnretweetTweet",
+    "DeleteRetweet",
     "UnfavoriteTweet",
 )
 

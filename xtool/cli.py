@@ -436,7 +436,43 @@ def _run_bulk(args: argparse.Namespace, action_key: str, verb: str) -> int:
         f"failed={stats.failed}  skipped={stats.skipped}  "
         f"attempted={stats.attempted}"
     )
+
+    # Surface the last failure reason so users don't have to grep the log.
+    if stats.failed > 0:
+        last_err = _last_log_error(args.log, _action_key_for(action_key))
+        if last_err:
+            console.print(
+                f"[red]last failure:[/red] {last_err}\n"
+                f"[dim]full log: {args.log}[/dim]"
+            )
     return 0 if stats.failed == 0 else 1
+
+
+def _action_key_for(action_key: str) -> str:
+    # The log's 'action' field uses the table key, not the GraphQL name.
+    return action_key
+
+
+def _last_log_error(log_path: str, action_key: str) -> str | None:
+    """Return the most recent 'error' field from a failed entry in the log."""
+    try:
+        with open(log_path, encoding="utf-8") as fh:
+            lines = fh.readlines()
+    except OSError:
+        return None
+    for line in reversed(lines):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        if rec.get("action") == action_key and rec.get("outcome") in ("failed", "auth_failed"):
+            err = rec.get("error")
+            if err:
+                return str(err)[:500]
+    return None
 
 
 def cmd_delete(args: argparse.Namespace) -> int:
