@@ -70,3 +70,43 @@ def read_jsonl(path: str | Path) -> Iterator[dict]:
             if not line:
                 continue
             yield json.loads(line)
+
+
+def iter_likes(path: str | Path) -> Iterator[dict]:
+    """Yield each like dict from an archive ``like.js`` file.
+
+    Entries look like::
+
+        { "like": { "tweetId": "123...",
+                    "fullText": "...",
+                    "expandedUrl": "https://twitter.com/i/web/status/123..." } }
+
+    Older archives may have flat ``{ "tweetId": ... }`` entries; we
+    support both and always produce a dict with ``id_str`` plus any
+    remaining fields, so downstream code (stats/filter) works the same
+    as for tweets.
+    """
+    raw = Path(path).read_text(encoding="utf-8")
+    stripped = _PREFIX_RE.sub("", raw, count=1).strip()
+    if not stripped:
+        return
+    data = json.loads(stripped)
+    if not isinstance(data, list):
+        raise ValueError(
+            f"{path}: expected JSON array after assignment, got "
+            f"{type(data).__name__}"
+        )
+    for entry in data:
+        if isinstance(entry, dict) and "like" in entry and isinstance(entry["like"], dict):
+            like = dict(entry["like"])
+        elif isinstance(entry, dict):
+            like = dict(entry)
+        else:
+            continue
+        # Normalize: expose the id under id_str so parser/filter/delete
+        # paths can stay uniform with tweets.
+        tid = like.get("tweetId") or like.get("id_str") or like.get("id")
+        if not tid:
+            continue
+        like.setdefault("id_str", str(tid))
+        yield like
