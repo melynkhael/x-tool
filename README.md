@@ -10,6 +10,10 @@ but fully local, free, scriptable, and open-source.
 > scroll wall does not apply because we read tweet IDs directly from your
 > archive.
 
+**New to this?** There's a complete step-by-step walkthrough in
+[TERMUX_GUIDE.md](./TERMUX_GUIDE.md) covering install, cookie extraction,
+dry-run, and the full delete flow on Android.
+
 ---
 
 ## Features
@@ -18,6 +22,10 @@ but fully local, free, scriptable, and open-source.
   no 3200-tweet scroll limit.
 - Three bulk actions: **delete** tweets, **unretweet** retweets,
   **unlike** likes.
+- **Safety-first**: verifies the authenticated account with `whoami`
+  before any destructive call, refuses `--rate > 2/s` without an
+  explicit override, requires a typed `yes` confirmation, and supports
+  `--expect-account` to abort on cookie/account mismatches.
 - **Auto-discovers** GraphQL query IDs from x.com's JS bundle so the
   tool keeps working when X rotates them (`xtool discover`), with a
   one-week cache and a bundled fallback table.
@@ -29,7 +37,8 @@ but fully local, free, scriptable, and open-source.
 - **No paid API needed** — authenticates with your browser's
   `auth_token` + `ct0` cookies and calls X's own internal GraphQL
   endpoint, the same mechanism Circleboom / Redact / TweetDelete use.
-- Handles rate-limits with exponential back-off.
+- Handles rate-limits with real `x-rate-limit-reset` backoff plus
+  exponential fallback.
 - Works on Termux (Android), any Linux, macOS and WSL.
 
 ---
@@ -153,18 +162,21 @@ All three share the same flags. They POST to X's internal GraphQL
 mutation endpoints (`DeleteTweet`, `UnretweetTweet`, `UnfavoriteTweet`)
 using your cookies.
 
-| Flag                 | Meaning                                       |
-|----------------------|-----------------------------------------------|
-| `--auth-token TOKEN` | X `auth_token` cookie                         |
-| `--ct0 TOKEN`        | X `ct0` cookie                                |
-| `--cookies-file F`   | JSON file with `{auth_token, ct0}`            |
-| `--rate R`           | requests per second (default 1.0)             |
-| `--dry-run`          | don't actually call X, just log               |
-| `--log FILE`         | progress log (per-action default)             |
-| `--query-id ID`      | pin a specific GraphQL query id               |
-| `--offline`          | don't auto-discover; use cache/fallback       |
-| `--resume`           | skip ids already in the log (default on)      |
-| `--no-resume`        | disable resume                                |
+| Flag                      | Meaning                                        |
+|---------------------------|------------------------------------------------|
+| `--auth-token TOKEN`      | X `auth_token` cookie                          |
+| `--ct0 TOKEN`             | X `ct0` cookie                                 |
+| `--cookies-file F`        | JSON file with `{auth_token, ct0}`             |
+| `--rate R`                | requests per second (default 1.0, ceiling 2.0) |
+| `--dry-run`               | don't actually call X, just log                |
+| `--log FILE`              | progress log (per-action default)              |
+| `--query-id ID`           | pin a specific GraphQL query id                |
+| `--offline`               | don't auto-discover; use cache/fallback        |
+| `--yes, -y`               | skip the interactive confirmation prompt       |
+| `--expect-account HANDLE` | abort if cookies don't belong to this @handle  |
+| `--i-know-what-im-doing`  | allow `--rate` above the 2.0/s safety ceiling  |
+| `--resume`                | skip ids already in the log (default on)       |
+| `--no-resume`             | disable resume                                 |
 
 Typical flow for likes:
 

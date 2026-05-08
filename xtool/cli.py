@@ -7,6 +7,7 @@ import json
 import os
 import re
 import sys
+import warnings
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
@@ -25,15 +26,17 @@ from rich.table import Table
 
 from . import __version__
 from .actions import (
+    ActionError,
     ActionStats,
     Credentials,
+    build_session,
     bulk_action,
     get_action,
+    whoami,
 )
 from .discovery import (
     CACHE_PATH as DISCOVERY_CACHE_PATH,
-    FALLBACK_QUERY_IDS,
-    discover_query_ids,
+    discover_with_sources,
 )
 from .filters import FilterOpts, apply_filter, classify, load_keep_ids, parse_created_at
 from .parser import iter_likes, iter_tweets, read_jsonl, write_jsonl
@@ -41,6 +44,12 @@ from .parser import iter_likes, iter_tweets, read_jsonl, write_jsonl
 
 COOKIES_PATH = Path(os.path.expanduser("~/.xtool/cookies.json"))
 console = Console()
+
+# Cap on --rate. X's real limits for DeleteTweet are roughly 1/sec over
+# long windows. Anything above 2/sec is almost certain to trigger 429s
+# and risks temporary account locks. We refuse to run faster without a
+# user opt-in.
+RATE_SAFETY_CEILING = 2.0
 
 
 # ---------------------------------------------------------------------------
@@ -157,8 +166,33 @@ def cmd_login(args: argparse.Namespace) -> int:
     if not auth_token or not ct0:
         console.print("[red]both values are required[/red]")
         return 1
-    Credentials(auth_token=auth_token, ct0=ct0).to_file(COOKIES_PATH)
-    console.print(f"[green]saved[/green] -> {COOKIES_PATH}")
+    try:
+        creds = Credentials(auth_token=auth_token, ct0=ct0)
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        return 1
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        chmodded = creds.to_file(COOKIES_PATH)
+        for w in caught:
+            console.print(f"[yellow]warning:[/yellow] {w.message}")
+    if chmodded:
+        console.print(f"[green]saved[/green] -> {COOKIES_PATH} (chmod 600)")
+    else:
+        console.print(
+            f"[yellow]saved[/yellow] -> {COOKIES_PATH} "
+            "[yellow](could not chmod 600 - this path does not support "
+            "POSIX permissions; move the file somewhere private)[/yellow]"
+        )
+    # Quick sanity check: can we authenticate?
+    console.print("[dim]verifying cookies with X...[/dim]")
+    session = build_session(creds)
+    try:
+        who = whoami(session)
+    except ActionError as exc:
+        console.print(f"[red]{exc}[/red]")
+        return 1
+    console.print(f"[green]logged in as[/green] @{who['screen_name']}")
     return 0
 
 
@@ -166,19 +200,24 @@ def cmd_login(args: argparse.Namespace) -> int:
 # subcommand: discover
 # ---------------------------------------------------------------------------
 def cmd_discover(args: argparse.Namespace) -> int:
-    ids = discover_query_ids(refresh=args.refresh, offline=args.offline)
+    sources = discover_with_sources(refresh=args.refresh, offline=args.offline)
     table = Table(title="GraphQL query IDs", show_header=True, header_style="bold")
     table.add_column("operation", style="cyan")
     table.add_column("query_id", style="bold")
     table.add_column("source")
-    for op in sorted(ids):
-        qid = ids[op]
-        source = (
-            "live" if qid != FALLBACK_QUERY_IDS.get(op) else "fallback"
-        )
-        table.add_row(op, qid, source)
+    for op in sorted(sources):
+        qid, src = sources[op]
+        colour = {"live": "green", "cache": "yellow", "fallback": "red"}.get(src, "")
+        table.add_row(op, qid, f"[{colour}]{src}[/{colour}]" if colour else src)
     console.print(table)
     console.print(f"[dim]cache: {DISCOVERY_CACHE_PATH}[/dim]")
+    # Hint if we're running blind.
+    live_count = sum(1 for _q, s in sources.values() if s == "live")
+    if live_count == 0 and not args.offline:
+        console.print(
+            "[yellow]no IDs came back live - check network access or "
+            "rerun with --offline to use the bundled fallback table.[/yellow]"
+        )
     return 0
 
 
@@ -186,11 +225,15 @@ def cmd_discover(args: argparse.Namespace) -> int:
 # subcommand: delete / unretweet / unlike (shared code)
 # ---------------------------------------------------------------------------
 def _load_credentials(args: argparse.Namespace) -> Credentials | None:
-    if args.auth_token and args.ct0:
-        return Credentials(args.auth_token, args.ct0)
     path = Path(args.cookies_file) if args.cookies_file else COOKIES_PATH
-    if path.exists():
-        return Credentials.from_file(path)
+    try:
+        if args.auth_token and args.ct0:
+            return Credentials(args.auth_token, args.ct0)
+        if path.exists():
+            return Credentials.from_file(path)
+    except ValueError as exc:
+        console.print(f"[red]credentials error:[/red] {exc}")
+        return None
     return None
 
 
@@ -218,6 +261,13 @@ def _iter_ids(path: str) -> Iterable[str]:
                 yield line
 
 
+def _confirm(prompt: str) -> bool:
+    try:
+        return input(prompt).strip().lower() in ("y", "yes")
+    except (EOFError, KeyboardInterrupt):
+        return False
+
+
 def _run_bulk(args: argparse.Namespace, action_key: str, verb: str) -> int:
     creds = _load_credentials(args)
     if creds is None and not args.dry_run:
@@ -227,9 +277,25 @@ def _run_bulk(args: argparse.Namespace, action_key: str, verb: str) -> int:
         )
         return 2
     if creds is None:
-        creds = Credentials("dry", "dry")
+        # Dry-run placeholder. Use 40-char values to avoid the
+        # "suspiciously short" warning during dry runs.
+        creds = Credentials(
+            auth_token="dry-run-placeholder-auth-token-value-0000",
+            ct0="dry-run-placeholder-ct0-csrf-token-value-0",
+        )
 
-    ids = list(_iter_ids(args.input))
+    # Load ids up-front. De-dupe here too (bulk_action dedupes at the
+    # attempt layer, but we want an accurate "target: N" banner).
+    raw_ids = list(_iter_ids(args.input))
+    seen: set[str] = set()
+    ids: list[str] = []
+    for tid in raw_ids:
+        if tid in seen:
+            continue
+        seen.add(tid)
+        ids.append(tid)
+    dup_count = len(raw_ids) - len(ids)
+
     if not ids:
         console.print("[yellow]nothing to do: 0 ids[/yellow]")
         return 0
@@ -238,48 +304,105 @@ def _run_bulk(args: argparse.Namespace, action_key: str, verb: str) -> int:
     qid_override = getattr(args, "query_id", None)
     query_id = qid_override or action.query_id(offline=args.offline)
 
+    # ---- identity check ----------------------------------------------------
+    screen_name: str | None = None
+    if not args.dry_run:
+        session = build_session(creds)
+        try:
+            who = whoami(session)
+        except ActionError as exc:
+            console.print(f"[red]{exc}[/red]")
+            return 2
+        screen_name = who["screen_name"]
+        if args.expect_account and args.expect_account.lstrip("@").lower() != screen_name.lower():
+            console.print(
+                f"[red]account mismatch:[/red] cookies belong to "
+                f"@{screen_name} but --expect-account is "
+                f"@{args.expect_account.lstrip('@')}. Refusing to run."
+            )
+            return 2
+
+    # ---- rate-cap safety ---------------------------------------------------
+    rate = args.rate
+    if rate > RATE_SAFETY_CEILING and not args.i_know_what_im_doing:
+        console.print(
+            f"[red]refusing to run at {rate}/s.[/red] Rates above "
+            f"{RATE_SAFETY_CEILING}/s are very likely to trigger 429s "
+            "and short-term account locks. Re-run with "
+            "[cyan]--i-know-what-im-doing[/cyan] to override, or lower "
+            "[cyan]--rate[/cyan]."
+        )
+        return 2
+
+    # ---- banner ------------------------------------------------------------
+    who_line = (
+        f"[bold]Account:[/bold] @{screen_name}  "
+        if screen_name
+        else "[bold]Account:[/bold] (dry-run, cookies not verified)  "
+    )
+    dup_line = f"  [dim](deduped {dup_count} duplicates)[/dim]" if dup_count else ""
     console.print(
-        f"[bold]Action:[/bold] {action.name}  "
-        f"[bold]Target:[/bold] {len(ids)}  "
-        f"[bold]Rate:[/bold] {args.rate}/s  "
-        f"[bold]Dry-run:[/bold] {args.dry_run}  "
-        f"[bold]Resume:[/bold] {args.resume}  "
-        f"[bold]queryId:[/bold] {query_id}"
+        who_line
+        + f"[bold]Action:[/bold] {action.name}  "
+        + f"[bold]Target:[/bold] {len(ids)}{dup_line}  "
+        + f"[bold]Rate:[/bold] {rate}/s  "
+        + f"[bold]Dry-run:[/bold] {args.dry_run}  "
+        + f"[bold]Resume:[/bold] {args.resume}  "
+        + f"[bold]queryId:[/bold] {query_id}"
     )
 
-    stats: ActionStats
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        BarColumn(),
-        MofNCompleteColumn(),
-        TimeElapsedColumn(),
-        console=console,
-        transient=False,
-    ) as bar:
-        task = bar.add_task(verb, total=len(ids))
-
-        def on_progress(s, tid, outcome):
-            bar.update(
-                task,
-                advance=1,
-                description=(
-                    f"ok={s.succeeded} gone={s.already_gone} "
-                    f"fail={s.failed} skip={s.skipped}"
-                ),
-            )
-
-        stats = bulk_action(
-            ids,
-            creds,
-            action,
-            rate=args.rate,
-            dry_run=args.dry_run,
-            log_path=args.log,
-            resume=args.resume,
-            on_progress=on_progress,
-            query_id=query_id,
+    # ---- confirmation ------------------------------------------------------
+    if not args.dry_run and not args.yes:
+        est_mins = (len(ids) / max(rate, 0.01)) / 60.0
+        console.print(
+            f"\n[bold red]This will run {action.name} on {len(ids)} "
+            f"tweets from @{screen_name}.[/bold red]\n"
+            f"Estimated duration: ~{est_mins:.1f} min at {rate}/s. "
+            "Deleted tweets [bold]cannot be recovered[/bold]."
         )
+        if not _confirm("Type 'yes' to proceed: "):
+            console.print("[yellow]aborted[/yellow]")
+            return 1
+
+    # ---- run ---------------------------------------------------------------
+    stats: ActionStats
+    try:
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            MofNCompleteColumn(),
+            TimeElapsedColumn(),
+            console=console,
+            transient=False,
+        ) as bar:
+            task = bar.add_task(verb, total=len(ids))
+
+            def on_progress(s, tid, outcome):
+                bar.update(
+                    task,
+                    advance=1,
+                    description=(
+                        f"ok={s.succeeded} gone={s.already_gone} "
+                        f"fail={s.failed} skip={s.skipped}"
+                    ),
+                )
+
+            stats = bulk_action(
+                ids,
+                creds,
+                action,
+                rate=rate,
+                dry_run=args.dry_run,
+                log_path=args.log,
+                resume=args.resume,
+                on_progress=on_progress,
+                query_id=query_id,
+            )
+    except ActionError as exc:
+        # auth_failed during the run -> abort cleanly.
+        console.print(f"\n[red]bulk run aborted:[/red] {exc}")
+        return 2
 
     console.print(
         "\n[bold green]done[/bold green]  "
@@ -325,6 +448,27 @@ def _add_bulk_flags(sp: argparse.ArgumentParser, default_log: str) -> None:
         "--offline",
         action="store_true",
         help="don't fetch x.com to auto-discover query ids; use cache/fallback",
+    )
+    sp.add_argument(
+        "--yes",
+        "-y",
+        action="store_true",
+        help="skip the interactive confirmation prompt (still shows a banner)",
+    )
+    sp.add_argument(
+        "--expect-account",
+        metavar="SCREEN_NAME",
+        help=(
+            "abort if the authenticated account's screen_name doesn't "
+            "match this (safety against running with the wrong cookies)"
+        ),
+    )
+    sp.add_argument(
+        "--i-know-what-im-doing",
+        action="store_true",
+        help=(
+            f"allow --rate above the {RATE_SAFETY_CEILING}/s safety ceiling"
+        ),
     )
     resume = sp.add_mutually_exclusive_group()
     resume.add_argument(

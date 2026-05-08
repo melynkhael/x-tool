@@ -101,3 +101,46 @@ def test_stale_cache_is_refreshed(tmp_path, monkeypatch):
     out = discover_query_ids()
     # Stale cache plus failed fetch -> we end up with fallbacks.
     assert out["DeleteTweet"] == FALLBACK_QUERY_IDS["DeleteTweet"]
+
+
+
+def test_discover_with_sources_labels(tmp_path, monkeypatch):
+    """Every returned entry is tagged live / cache / fallback correctly."""
+    from xtool.discovery import discover_with_sources
+
+    cache = tmp_path / "q.json"
+    cache.write_text(
+        json.dumps(
+            {
+                "fetched_at": time.time(),
+                "ids": {
+                    "DeleteTweet": "cachedDelete1234",
+                    # Override a fallback entry with a cached value.
+                    "UnretweetTweet": FALLBACK_QUERY_IDS["UnretweetTweet"],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(discovery, "CACHE_PATH", cache)
+    out = discover_with_sources(offline=True)
+    # DeleteTweet came from cache (different from fallback).
+    assert out["DeleteTweet"] == ("cachedDelete1234", "cache")
+    # UnretweetTweet came from cache even though the id matches fallback -
+    # the source label is about provenance, not the value.
+    assert out["UnretweetTweet"][1] == "cache"
+    # An op present only in FALLBACK_QUERY_IDS reports 'fallback'.
+    assert out["UnfavoriteTweet"][1] == "fallback"
+
+
+def test_discover_survives_generic_exception(tmp_path, monkeypatch):
+    """A non-RequestException from the scraper must not crash discovery."""
+    monkeypatch.setattr(discovery, "CACHE_PATH", tmp_path / "q.json")
+
+    def kaboom(*_a, **_kw):
+        raise RuntimeError("unexpected parse failure")
+
+    monkeypatch.setattr(discovery, "_discover_uncached", kaboom)
+    out = discover_query_ids()
+    # We still get a usable table (fallbacks).
+    assert out["DeleteTweet"] == FALLBACK_QUERY_IDS["DeleteTweet"]
