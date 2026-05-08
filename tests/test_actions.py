@@ -115,7 +115,7 @@ def test_bulk_action_auth_failed_aborts(tmp_path, monkeypatch):
     from xtool import actions as actions_mod
 
     def fake_attempt(*_a, **_kw):
-        return "auth_failed"
+        return "auth_failed", "HTTP 401: Could not authenticate you"
 
     monkeypatch.setattr(actions_mod, "_attempt", fake_attempt)
 
@@ -128,3 +128,39 @@ def test_bulk_action_auth_failed_aborts(tmp_path, monkeypatch):
     lines = [json.loads(l) for l in log.read_text().splitlines() if l.strip()]
     assert len(lines) == 1
     assert lines[0]["outcome"] == "auth_failed"
+    # New: the error detail must be present in the log.
+    assert "Could not authenticate you" in lines[0]["error"]
+
+
+def test_bulk_action_records_error_detail(tmp_path, monkeypatch):
+    """A normal 'failed' outcome must record the error body in the log."""
+    log = tmp_path / "log.jsonl"
+    from xtool import actions as actions_mod
+
+    def fake_attempt(*_a, **_kw):
+        return "failed", 'HTTP 422: {"errors":[{"message":"bad request"}]}'
+
+    monkeypatch.setattr(actions_mod, "_attempt", fake_attempt)
+
+    stats = bulk_action(
+        ["111"], DRY_CREDS, get_action("unretweet"),
+        dry_run=False, log_path=log, resume=False, rate=0,
+    )
+    assert stats.failed == 1
+    lines = [json.loads(l) for l in log.read_text().splitlines() if l.strip()]
+    assert lines[0]["outcome"] == "failed"
+    assert "HTTP 422" in lines[0]["error"]
+    assert "bad request" in lines[0]["error"]
+
+
+def test_unretweet_action_uses_DeleteRetweet():
+    """Regression: live X web client uses DeleteRetweet, not UnretweetTweet."""
+    action = get_action("unretweet")
+    assert action.name == "DeleteRetweet", (
+        "unretweet must call the DeleteRetweet GraphQL operation; "
+        "UnretweetTweet was retired by X and returns HTTP 422."
+    )
+    assert action.build_variables("123") == {
+        "source_tweet_id": "123",
+        "dark_request": False,
+    }
