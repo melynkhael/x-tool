@@ -3,26 +3,64 @@
 from __future__ import annotations
 
 import json
+import warnings
 
 import pytest
 
-from xtool.actions import ACTIONS, Credentials, bulk_action, get_action
+from xtool.actions import (
+    ACTIONS,
+    ActionError,
+    Credentials,
+    bulk_action,
+    get_action,
+)
+
+
+DRY_CREDS = Credentials(
+    auth_token="a" * 40,
+    ct0="b" * 40,
+)
 
 
 def test_action_table_covers_required_ops():
     assert set(ACTIONS) >= {"delete", "unretweet", "unlike"}
-    # Each action must produce variables that include the id.
     for key, action in ACTIONS.items():
         vars_ = action.build_variables("123")
         assert "123" in json.dumps(vars_), key
 
 
+def test_credentials_reject_empty():
+    with pytest.raises(ValueError):
+        Credentials("", "something")
+    with pytest.raises(ValueError):
+        Credentials("something", "")
+
+
+def test_credentials_warn_on_short_values():
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        Credentials("short", "also_short")
+    assert any("suspiciously short" in str(w.message) for w in caught)
+
+
+def test_credentials_from_file_bad_json(tmp_path):
+    p = tmp_path / "bad.json"
+    p.write_text("not json", encoding="utf-8")
+    with pytest.raises(ValueError, match="cannot read credentials"):
+        Credentials.from_file(p)
+
+
+def test_credentials_from_file_missing_key(tmp_path):
+    p = tmp_path / "half.json"
+    p.write_text(json.dumps({"auth_token": "aaaaaaaaaaaaaaaaaaaaaaaa"}), encoding="utf-8")
+    with pytest.raises(ValueError, match="missing required key"):
+        Credentials.from_file(p)
+
+
 def test_bulk_action_dry_run_logs_action_field(tmp_path):
     log = tmp_path / "log.jsonl"
-    action = get_action("unretweet")
-    creds = Credentials("dry", "dry")
     stats = bulk_action(
-        ["111", "222"], creds, action,
+        ["111", "222"], DRY_CREDS, get_action("unretweet"),
         dry_run=True, log_path=log, resume=True, rate=0,
     )
     assert stats.attempted == 2
@@ -33,30 +71,60 @@ def test_bulk_action_dry_run_logs_action_field(tmp_path):
 
 def test_bulk_action_resume_is_scoped_per_action(tmp_path):
     log = tmp_path / "log.jsonl"
-    creds = Credentials("dry", "dry")
-    # First, record an "unretweet" of id 111.
     bulk_action(
-        ["111"], creds, get_action("unretweet"),
+        ["111"], DRY_CREDS, get_action("unretweet"),
         dry_run=True, log_path=log, resume=True, rate=0,
     )
-    # A later "delete" of the same id must NOT be skipped.
     stats = bulk_action(
-        ["111"], creds, get_action("delete"),
+        ["111"], DRY_CREDS, get_action("delete"),
         dry_run=True, log_path=log, resume=True, rate=0,
     )
     assert stats.attempted == 1
     assert stats.skipped == 0
 
 
+def test_bulk_action_dedupes_within_run(tmp_path):
+    log = tmp_path / "log.jsonl"
+    stats = bulk_action(
+        ["111", "222", "111", "333", "222"], DRY_CREDS, get_action("delete"),
+        dry_run=True, log_path=log, resume=False, rate=0,
+    )
+    assert stats.attempted == 3  # 111, 222, 333 - each processed once
+    lines = [json.loads(l) for l in log.read_text().splitlines() if l.strip()]
+    assert [r["id"] for r in lines] == ["111", "222", "333"]
+
+
 def test_legacy_deleter_still_works(tmp_path):
-    """Old callers that import from xtool.deleter keep working."""
     from xtool.deleter import bulk_delete
 
     log = tmp_path / "deleted.jsonl"
     stats = bulk_delete(
-        ["555"], Credentials("dry", "dry"),
+        ["555"], DRY_CREDS,
         dry_run=True, log_path=log, resume=True, rate=0,
     )
-    # Legacy attribute name is still readable.
     assert stats.deleted == 0
     assert stats.attempted == 1
+
+
+def test_bulk_action_auth_failed_aborts(tmp_path, monkeypatch):
+    """An auth_failed outcome must raise ActionError instead of
+    silently failing every id in the list."""
+    log = tmp_path / "log.jsonl"
+
+    # Monkeypatch _attempt to simulate bad credentials.
+    from xtool import actions as actions_mod
+
+    def fake_attempt(*_a, **_kw):
+        return "auth_failed"
+
+    monkeypatch.setattr(actions_mod, "_attempt", fake_attempt)
+
+    with pytest.raises(ActionError, match="authentication rejected"):
+        bulk_action(
+            ["111", "222", "333"], DRY_CREDS, get_action("delete"),
+            dry_run=False, log_path=log, resume=False, rate=0,
+        )
+    # Only the first id should have been attempted + logged.
+    lines = [json.loads(l) for l in log.read_text().splitlines() if l.strip()]
+    assert len(lines) == 1
+    assert lines[0]["outcome"] == "auth_failed"
