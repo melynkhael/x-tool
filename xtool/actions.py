@@ -198,77 +198,157 @@ def build_session(creds: Credentials) -> requests.Session:
             ),
         }
     )
-    # Set cookies for both x.com and twitter.com so redirects between
-    # the two don't drop our auth.
-    for domain in (".x.com", ".twitter.com"):
-        s.cookies.set("auth_token", creds.auth_token, domain=domain)
-        s.cookies.set("ct0", creds.ct0, domain=domain)
+    # Set cookies. We previously set them on both .x.com and .twitter.com
+    # so cross-host redirects would keep auth, but requests' cookiejar
+    # then raises 'multiple cookies with name' when you prepare_request
+    # for ANY host that matches both (or during redirect merging). We
+    # only set them on .x.com now, plus .twitter.com, using per-host
+    # paths that never overlap in a single request. In practice X no
+    # longer 302s across hosts for authenticated API calls so this is
+    # fine.
+    s.cookies.set("auth_token", creds.auth_token, domain=".x.com", path="/")
+    s.cookies.set("ct0", creds.ct0, domain=".x.com", path="/")
+    # Legacy host -- requests' cookiejar keys (name, domain, path) so
+    # this doesn't collide with the .x.com entries above. When we
+    # request twitter.com / api.twitter.com these get sent; when we
+    # request x.com only the .x.com copies do.
+    s.cookies.set("auth_token", creds.auth_token, domain=".twitter.com", path="/")
+    s.cookies.set("ct0", creds.ct0, domain=".twitter.com", path="/")
     return s
+
+
+# Endpoints tried by whoami() in order. The first that returns a JSON
+# body with a non-empty screen_name wins.
+_WHOAMI_ENDPOINTS: tuple[str, ...] = (
+    "https://x.com/i/api/1.1/account/settings.json",
+    "https://x.com/i/api/1.1/account/verify_credentials.json"
+    "?include_email=false&skip_status=true",
+    "https://twitter.com/i/api/1.1/account/settings.json",
+    "https://twitter.com/i/api/1.1/account/verify_credentials.json",
+    "https://api.twitter.com/1.1/account/settings.json",
+    "https://api.twitter.com/1.1/account/verify_credentials.json"
+    "?skip_status=true",
+)
 
 
 def whoami(session: requests.Session, timeout: float = 20.0) -> dict:
     """Return the authenticated account's identity.
 
-    The X web client uses the legacy REST endpoint
-    ``https://x.com/i/api/1.1/account/settings.json`` to resolve the
-    logged-in user's screen_name (same ``/i/api/`` path used for every
-    GraphQL mutation, just under the 1.1 tree). We hit that rather
-    than a GraphQL query because REST doesn't need a rotating queryId
-    or a ``features`` blob.
+    Walks a list of known REST endpoints (see ``_WHOAMI_ENDPOINTS``)
+    until one returns a JSON body containing ``screen_name``.
 
-    Note: the host is ``x.com``, NOT ``api.x.com`` -- the latter only
-    serves the GraphQL layer and returns HTTP 404 / code 34 for REST
-    paths.
+    Uses ``requests.get`` directly with a *minimal* header set instead
+    of ``session.get``, because the GraphQL session carries
+    ``content-type: application/json`` and ``origin: https://x.com`` as
+    defaults -- both of which some X edge configs reject on GET
+    requests, returning HTTP 404 with error code 34 instead of the
+    expected JSON.
 
-    Returns a dict with at minimum ``screen_name``. Raises
-    :class:`ActionError` on HTTP errors so callers can show a clear
-    "your cookies don't work" message.
+    Returns a dict with ``screen_name`` plus (when available) ``user_id``
+    and the raw response body. Raises :class:`ActionError` with a
+    detailed, actionable message on failure.
     """
-    # Primary path used by the current web client.
-    endpoints = (
-        "https://x.com/i/api/1.1/account/settings.json",
-        # Fallback: legacy host still answers for authenticated sessions.
-        "https://api.twitter.com/1.1/account/settings.json",
-    )
-    last_error: ActionError | None = None
-    for url in endpoints:
+    # Pull ct0 from the cookie jar without tripping the 'multiple cookies
+    # with name' error requests raises when both .x.com and .twitter.com
+    # entries are present. We prefer the .x.com value since we're hitting
+    # x.com first.
+    ct0 = ""
+    for c in session.cookies:
+        if c.name == "ct0":
+            ct0 = c.value or ""
+            if c.domain.endswith("x.com"):
+                break
+    # Deliberately minimal -- no content-type, no origin.
+    headers = {
+        "authorization": f"Bearer {WEB_BEARER}",
+        "x-csrf-token": ct0,
+        "x-twitter-active-user": "yes",
+        "x-twitter-auth-type": "OAuth2Session",
+        "x-twitter-client-language": "en",
+        "accept": "*/*",
+        "accept-language": "en-US,en;q=0.9",
+        "referer": "https://x.com/",
+        "user-agent": (
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        ),
+    }
+
+    errors: list[str] = []
+    for url in _WHOAMI_ENDPOINTS:
+        short = url.split("?", 1)[0]
         try:
-            resp = session.get(url, timeout=timeout)
+            # Use session.get so the shared cookiejar is sent with the
+            # right Host-scoping logic; override headers for this one
+            # request to drop content-type / origin which confuse X's
+            # REST edge. requests' prepare step merges these with
+            # session.headers, so we null out the defaults we don't want.
+            req = requests.Request("GET", url, headers=headers)
+            prepped = session.prepare_request(req)
+            # Strip any content-type inherited from the session.
+            prepped.headers.pop("content-type", None)
+            prepped.headers.pop("Content-Type", None)
+            prepped.headers.pop("origin", None)
+            prepped.headers.pop("Origin", None)
+            resp = session.send(prepped, timeout=timeout, allow_redirects=False)
         except requests.RequestException as exc:
-            last_error = ActionError(f"whoami: network error: {exc}")
+            errors.append(f"{short}: network error: {type(exc).__name__}: {exc}")
             continue
+
+        # Real auth failures stop the whole cascade.
         if resp.status_code in (401, 403):
+            snippet = resp.text[:200].replace("\n", " ").strip()
             raise ActionError(
-                "authentication failed (HTTP {}): your auth_token or ct0 "
-                "cookie is invalid or expired. Log back into x.com in a "
-                "browser and rerun 'xtool login'.".format(resp.status_code)
+                f"authentication failed (HTTP {resp.status_code}): "
+                "your auth_token or ct0 cookie is invalid or expired. "
+                "Log back into x.com in a browser and rerun 'xtool "
+                f"login'. Server said: {snippet or '(empty body)'}"
             )
-        if resp.status_code == 404:
-            # Endpoint moved - try the next candidate.
-            last_error = ActionError(f"whoami HTTP 404 at {url}")
-            continue
+
         if not resp.ok:
-            last_error = ActionError(
-                f"whoami HTTP {resp.status_code}: {resp.text[:200]}"
-            )
+            snippet = resp.text[:160].replace("\n", " ").strip()
+            errors.append(f"{short}: HTTP {resp.status_code}: {snippet or '(empty body)'}")
             continue
+
         try:
             body = resp.json()
-        except ValueError as exc:
-            last_error = ActionError(
-                f"whoami non-JSON response: {resp.text[:200]}"
-            )
+        except ValueError:
+            errors.append(f"{short}: non-JSON response")
             continue
+
         screen_name = body.get("screen_name")
-        if not screen_name:
-            last_error = ActionError(
-                "whoami response had no screen_name; the endpoint shape "
-                "may have changed"
-            )
-            continue
-        return {"screen_name": screen_name, "raw": body}
-    assert last_error is not None
-    raise last_error
+        if screen_name:
+            user_id = str(body.get("id_str") or body.get("id") or "") or None
+            return {"screen_name": screen_name, "user_id": user_id, "raw": body}
+
+        errors.append(f"{short}: JSON without screen_name: {str(body)[:120]}")
+
+    # All endpoints failed. Extract whatever identity hint we can from
+    # the cookies so the error message is useful.
+    twid = ""
+    for c in session.cookies:
+        if c.name == "twid":
+            twid = c.value or ""
+            break
+    user_id_hint = ""
+    import re as _re
+    m = _re.search(r"u(?:%3D|=)(\d+)", twid)
+    if m:
+        user_id_hint = f"\n  (twid cookie suggests user_id={m.group(1)} -- your auth seems present)"
+
+    raise ActionError(
+        "could not verify your identity with X. Tried "
+        f"{len(_WHOAMI_ENDPOINTS)} REST endpoints, all failed:\n  "
+        + "\n  ".join(errors)
+        + user_id_hint
+        + "\n\nLikely causes:\n"
+        "  1. Cookies expired -- log back into x.com and rerun 'xtool login'.\n"
+        "  2. X deprecated these endpoints -- open an issue at\n"
+        "     https://github.com/melynkhael/x-tool/issues\n"
+        "  3. Network blocks x.com (VPN, firewall, captive portal).\n"
+        "\nEscape hatch: pass --skip-whoami to delete/unretweet/unlike\n"
+        "to bypass the identity check (you lose --expect-account safety)."
+    )
 
 
 def perform_action(
