@@ -160,6 +160,30 @@ def discover_query_ids(
     The result is always a superset of ``FALLBACK_QUERY_IDS`` so callers
     can depend on every known op being present.
     """
+    return {
+        op: qid
+        for op, (qid, _src) in _merged(
+            refresh=refresh, offline=offline, ttl=ttl
+        ).items()
+    }
+
+
+def discover_with_sources(
+    *,
+    refresh: bool = False,
+    offline: bool = False,
+    ttl: int = CACHE_TTL_SECONDS,
+) -> dict[str, tuple[str, str]]:
+    """Like :func:`discover_query_ids` but also tags each entry with its
+    source: ``"live"``, ``"cache"`` or ``"fallback"``.
+
+    The network is hit at most once per call, even when multiple callers
+    invoke this function, because we write through to the on-disk cache.
+    """
+    return _merged(refresh=refresh, offline=offline, ttl=ttl)
+
+
+def _merged(*, refresh: bool, offline: bool, ttl: int) -> dict[str, tuple[str, str]]:
     cache = _load_cache()
     now = time.time()
     fresh = (
@@ -169,29 +193,35 @@ def discover_query_ids(
         and isinstance(cache.get("ids"), dict)
     )
 
+    sources: dict[str, tuple[str, str]] = {
+        op: (qid, "fallback") for op, qid in FALLBACK_QUERY_IDS.items()
+    }
+
     if fresh and not refresh:
-        merged = dict(FALLBACK_QUERY_IDS)
-        merged.update(cache["ids"])  # type: ignore[index]
-        return merged
+        for op, qid in cache["ids"].items():  # type: ignore[union-attr]
+            sources[op] = (qid, "cache")
+        return sources
 
     if offline:
         if cache and isinstance(cache.get("ids"), dict):
-            merged = dict(FALLBACK_QUERY_IDS)
-            merged.update(cache["ids"])
-            return merged
-        return dict(FALLBACK_QUERY_IDS)
+            for op, qid in cache["ids"].items():
+                sources[op] = (qid, "cache")
+        return sources
 
     try:
         discovered = _discover_uncached()
-    except requests.RequestException:
+    except Exception:  # network, parse, DNS, TLS, anything
         discovered = {}
 
     if discovered:
-        _save_cache({"fetched_at": now, "ids": discovered})
+        try:
+            _save_cache({"fetched_at": now, "ids": discovered})
+        except OSError:
+            pass  # read-only filesystem (some Termux storage paths)
+        for op, qid in discovered.items():
+            sources[op] = (qid, "live")
 
-    merged = dict(FALLBACK_QUERY_IDS)
-    merged.update(discovered)
-    return merged
+    return sources
 
 
 def get_query_id(operation: str, *, offline: bool = False) -> str:

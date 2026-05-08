@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import time
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterable, Optional
@@ -45,7 +46,15 @@ class ActionError(Exception):
 
 
 class RateLimited(Exception):
-    """HTTP 429 - caller should back off."""
+    """HTTP 429 - caller should back off.
+
+    ``reset_epoch`` is the unix timestamp (seconds) reported by the
+    ``x-rate-limit-reset`` header when present, else 0.
+    """
+
+    def __init__(self, reset_epoch: float = 0.0):
+        super().__init__(f"rate limited; reset_epoch={reset_epoch}")
+        self.reset_epoch = reset_epoch
 
 
 @dataclass
@@ -53,12 +62,46 @@ class Credentials:
     auth_token: str
     ct0: str
 
+    def __post_init__(self) -> None:
+        # Validate shape early so bulk runs don't fail mid-flight.
+        if not self.auth_token or not isinstance(self.auth_token, str):
+            raise ValueError("auth_token is missing or not a string")
+        if not self.ct0 or not isinstance(self.ct0, str):
+            raise ValueError("ct0 is missing or not a string")
+        # auth_token is a 40-char hex string in real sessions; ct0 is
+        # typically 32-160 chars. We don't hard-enforce format to avoid
+        # breaking when X changes encoding, but we do warn on suspicious
+        # lengths so obvious mistakes (pasting a trimmed value) surface.
+        if len(self.auth_token) < 20 or len(self.ct0) < 20:
+            warnings.warn(
+                "credential values look suspiciously short; double-check "
+                "you copied the full cookie values",
+                stacklevel=2,
+            )
+
     @classmethod
     def from_file(cls, path: str | Path) -> "Credentials":
-        data = json.loads(Path(path).read_text(encoding="utf-8"))
-        return cls(auth_token=data["auth_token"], ct0=data["ct0"])
+        path = Path(path)
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise ValueError(
+                f"cannot read credentials from {path}: {exc}"
+            ) from exc
+        if not isinstance(data, dict):
+            raise ValueError(
+                f"{path}: expected a JSON object with auth_token and ct0"
+            )
+        try:
+            return cls(auth_token=data["auth_token"], ct0=data["ct0"])
+        except KeyError as exc:
+            raise ValueError(
+                f"{path}: missing required key {exc.args[0]!r} "
+                "(expected 'auth_token' and 'ct0')"
+            ) from exc
 
-    def to_file(self, path: str | Path) -> None:
+    def to_file(self, path: str | Path) -> bool:
+        """Persist credentials. Returns True if file permissions are 0600."""
         p = Path(path)
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(
@@ -68,7 +111,9 @@ class Credentials:
         try:
             p.chmod(0o600)
         except OSError:
-            pass
+            # Some Termux shared-storage paths don't support chmod.
+            return False
+        return True
 
 
 @dataclass(frozen=True)
@@ -153,9 +198,50 @@ def build_session(creds: Credentials) -> requests.Session:
             ),
         }
     )
-    s.cookies.set("auth_token", creds.auth_token, domain=".x.com")
-    s.cookies.set("ct0", creds.ct0, domain=".x.com")
+    # Set cookies for both x.com and twitter.com so redirects between
+    # the two don't drop our auth.
+    for domain in (".x.com", ".twitter.com"):
+        s.cookies.set("auth_token", creds.auth_token, domain=domain)
+        s.cookies.set("ct0", creds.ct0, domain=domain)
     return s
+
+
+def whoami(session: requests.Session, timeout: float = 20.0) -> dict:
+    """Return the authenticated account's identity.
+
+    Uses the stable REST endpoint ``/1.1/account/settings.json`` rather
+    than a GraphQL query, because REST doesn't need a rotating queryId
+    or a ``features`` blob and has been reachable from web sessions for
+    over a decade.
+
+    Returns a dict with at minimum ``screen_name``. Raises
+    :class:`ActionError` on HTTP errors so callers can show a clear
+    "your cookies don't work" message.
+    """
+    url = "https://api.x.com/1.1/account/settings.json"
+    try:
+        resp = session.get(url, timeout=timeout)
+    except requests.RequestException as exc:
+        raise ActionError(f"whoami: network error: {exc}") from exc
+    if resp.status_code in (401, 403):
+        raise ActionError(
+            "authentication failed (HTTP {}): your auth_token or ct0 "
+            "cookie is invalid or expired. Log back into x.com in a "
+            "browser and rerun 'xtool login'.".format(resp.status_code)
+        )
+    if not resp.ok:
+        raise ActionError(f"whoami HTTP {resp.status_code}: {resp.text[:200]}")
+    try:
+        body = resp.json()
+    except ValueError as exc:
+        raise ActionError(f"whoami non-JSON response: {resp.text[:200]}") from exc
+    screen_name = body.get("screen_name")
+    if not screen_name:
+        raise ActionError(
+            "whoami response had no screen_name; the endpoint shape may "
+            "have changed"
+        )
+    return {"screen_name": screen_name, "raw": body}
 
 
 def perform_action(
@@ -170,17 +256,31 @@ def perform_action(
 
     Raises:
         RateLimited: on HTTP 429.
-        ActionError: on any other non-recoverable failure.
+        ActionError: on any other non-recoverable failure (including
+            network errors - callers are expected to catch and retry
+            those at their own cadence).
     """
     qid = query_id or action.query_id()
     url = f"https://x.com/i/api/graphql/{qid}/{action.name}"
     payload = {"variables": action.build_variables(tweet_id), "queryId": qid}
-    resp = session.post(url, json=payload, timeout=timeout)
+    try:
+        resp = session.post(url, json=payload, timeout=timeout)
+    except requests.RequestException as exc:
+        raise ActionError(f"network error: {exc}") from exc
 
     if resp.status_code == 429:
-        raise RateLimited(resp.headers.get("x-rate-limit-reset", ""))
+        try:
+            reset = float(resp.headers.get("x-rate-limit-reset", "0") or 0)
+        except (TypeError, ValueError):
+            reset = 0.0
+        raise RateLimited(reset_epoch=reset)
     if resp.status_code == 404:
         return {"already_gone": True}
+    if resp.status_code in (401, 403):
+        raise ActionError(
+            f"HTTP {resp.status_code}: authentication rejected. "
+            "Your auth_token/ct0 cookies are invalid or expired."
+        )
     if not resp.ok:
         raise ActionError(f"HTTP {resp.status_code}: {resp.text[:300]}")
 
@@ -247,9 +347,17 @@ def bulk_action(
     interval = 1.0 / rate if rate > 0 else 0.0
     qid = query_id or action.query_id()
 
+    # Track in-memory to dedup within a single run (not just across runs).
+    seen_this_run: set[str] = set()
+
     with log_path.open("a", encoding="utf-8") as log_fh:
         for tid in tweet_ids:
             tid = str(tid)
+            if tid in seen_this_run:
+                # Duplicate id inside the input file; processed once already.
+                continue
+            seen_this_run.add(tid)
+
             key = (tid, _action_key(action))
             if key in already:
                 stats.skipped += 1
@@ -267,6 +375,28 @@ def bulk_action(
                     stats.succeeded += 1
                 elif outcome == action.gone_tense:
                     stats.already_gone += 1
+                elif outcome == "auth_failed":
+                    # Credentials are bad; aborting rather than burning
+                    # through the list.
+                    stats.failed += 1
+                    log_fh.write(
+                        json.dumps(
+                            {
+                                "id": tid,
+                                "action": _action_key(action),
+                                "outcome": outcome,
+                                "ts": time.time(),
+                            }
+                        )
+                        + "\n"
+                    )
+                    log_fh.flush()
+                    if on_progress:
+                        on_progress(stats, tid, outcome)
+                    raise ActionError(
+                        "authentication rejected by X; stopped bulk run. "
+                        "Refresh your cookies with 'xtool login' and retry."
+                    )
                 else:
                     stats.failed += 1
 
@@ -306,14 +436,36 @@ def _attempt(
     qid: str,
     max_retries: int,
 ) -> str:
+    """Single-id retry loop.
+
+    * Rate limits: sleep until ``x-rate-limit-reset`` (clamped to [5s, 15m])
+      if the header is present, otherwise exponential back-off.
+    * Auth failures (401/403) bail out immediately to avoid burning the
+      whole list with bad cookies.
+    * Transient network/5xx errors are retried with a short back-off.
+    """
     delay = 5.0
-    for _ in range(max_retries):
+    for attempt in range(max_retries):
         try:
             body = perform_action(session, action, tid, query_id=qid)
             return action.gone_tense if body.get("already_gone") else action.past_tense
-        except RateLimited:
-            time.sleep(delay)
-            delay = min(delay * 2, 120.0)
-        except ActionError:
+        except RateLimited as rl:
+            if rl.reset_epoch:
+                wait = max(5.0, min(rl.reset_epoch - time.time() + 1.0, 900.0))
+            else:
+                wait = delay
+                delay = min(delay * 2, 120.0)
+            time.sleep(wait)
+        except ActionError as exc:
+            msg = str(exc)
+            # Auth failures: stop trying so we don't hammer with bad
+            # cookies. Surface via 'failed' outcome; CLI will abort.
+            if "authentication rejected" in msg:
+                return "auth_failed"
+            # Transient network/5xx: retry with a small back-off.
+            if "network error" in msg or "HTTP 5" in msg:
+                time.sleep(delay)
+                delay = min(delay * 2, 60.0)
+                continue
             return "failed"
     return "failed"
