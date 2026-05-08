@@ -209,39 +209,66 @@ def build_session(creds: Credentials) -> requests.Session:
 def whoami(session: requests.Session, timeout: float = 20.0) -> dict:
     """Return the authenticated account's identity.
 
-    Uses the stable REST endpoint ``/1.1/account/settings.json`` rather
-    than a GraphQL query, because REST doesn't need a rotating queryId
-    or a ``features`` blob and has been reachable from web sessions for
-    over a decade.
+    The X web client uses the legacy REST endpoint
+    ``https://x.com/i/api/1.1/account/settings.json`` to resolve the
+    logged-in user's screen_name (same ``/i/api/`` path used for every
+    GraphQL mutation, just under the 1.1 tree). We hit that rather
+    than a GraphQL query because REST doesn't need a rotating queryId
+    or a ``features`` blob.
+
+    Note: the host is ``x.com``, NOT ``api.x.com`` -- the latter only
+    serves the GraphQL layer and returns HTTP 404 / code 34 for REST
+    paths.
 
     Returns a dict with at minimum ``screen_name``. Raises
     :class:`ActionError` on HTTP errors so callers can show a clear
     "your cookies don't work" message.
     """
-    url = "https://api.x.com/1.1/account/settings.json"
-    try:
-        resp = session.get(url, timeout=timeout)
-    except requests.RequestException as exc:
-        raise ActionError(f"whoami: network error: {exc}") from exc
-    if resp.status_code in (401, 403):
-        raise ActionError(
-            "authentication failed (HTTP {}): your auth_token or ct0 "
-            "cookie is invalid or expired. Log back into x.com in a "
-            "browser and rerun 'xtool login'.".format(resp.status_code)
-        )
-    if not resp.ok:
-        raise ActionError(f"whoami HTTP {resp.status_code}: {resp.text[:200]}")
-    try:
-        body = resp.json()
-    except ValueError as exc:
-        raise ActionError(f"whoami non-JSON response: {resp.text[:200]}") from exc
-    screen_name = body.get("screen_name")
-    if not screen_name:
-        raise ActionError(
-            "whoami response had no screen_name; the endpoint shape may "
-            "have changed"
-        )
-    return {"screen_name": screen_name, "raw": body}
+    # Primary path used by the current web client.
+    endpoints = (
+        "https://x.com/i/api/1.1/account/settings.json",
+        # Fallback: legacy host still answers for authenticated sessions.
+        "https://api.twitter.com/1.1/account/settings.json",
+    )
+    last_error: ActionError | None = None
+    for url in endpoints:
+        try:
+            resp = session.get(url, timeout=timeout)
+        except requests.RequestException as exc:
+            last_error = ActionError(f"whoami: network error: {exc}")
+            continue
+        if resp.status_code in (401, 403):
+            raise ActionError(
+                "authentication failed (HTTP {}): your auth_token or ct0 "
+                "cookie is invalid or expired. Log back into x.com in a "
+                "browser and rerun 'xtool login'.".format(resp.status_code)
+            )
+        if resp.status_code == 404:
+            # Endpoint moved - try the next candidate.
+            last_error = ActionError(f"whoami HTTP 404 at {url}")
+            continue
+        if not resp.ok:
+            last_error = ActionError(
+                f"whoami HTTP {resp.status_code}: {resp.text[:200]}"
+            )
+            continue
+        try:
+            body = resp.json()
+        except ValueError as exc:
+            last_error = ActionError(
+                f"whoami non-JSON response: {resp.text[:200]}"
+            )
+            continue
+        screen_name = body.get("screen_name")
+        if not screen_name:
+            last_error = ActionError(
+                "whoami response had no screen_name; the endpoint shape "
+                "may have changed"
+            )
+            continue
+        return {"screen_name": screen_name, "raw": body}
+    assert last_error is not None
+    raise last_error
 
 
 def perform_action(
