@@ -190,7 +190,14 @@ def cmd_login(args: argparse.Namespace) -> int:
     try:
         who = whoami(session)
     except ActionError as exc:
-        console.print(f"[red]{exc}[/red]")
+        console.print(f"[yellow]{exc}[/yellow]")
+        console.print(
+            "\n[yellow]Cookies were saved, but we could NOT verify your "
+            "identity.[/yellow] You can still run bulk commands by adding "
+            "[cyan]--skip-whoami[/cyan], but you lose the "
+            "[cyan]--expect-account[/cyan] safety net. It's safer to refresh "
+            "your cookies and rerun [cyan]xtool login[/cyan] first."
+        )
         return 1
     console.print(f"[green]logged in as[/green] @{who['screen_name']}")
     return 0
@@ -306,7 +313,7 @@ def _run_bulk(args: argparse.Namespace, action_key: str, verb: str) -> int:
 
     # ---- identity check ----------------------------------------------------
     screen_name: str | None = None
-    if not args.dry_run:
+    if not args.dry_run and not args.skip_whoami:
         session = build_session(creds)
         try:
             who = whoami(session)
@@ -321,6 +328,19 @@ def _run_bulk(args: argparse.Namespace, action_key: str, verb: str) -> int:
                 f"@{args.expect_account.lstrip('@')}. Refusing to run."
             )
             return 2
+    elif not args.dry_run and args.skip_whoami:
+        # User opted out of the identity check.
+        if args.expect_account:
+            console.print(
+                "[red]--expect-account cannot be combined with "
+                "--skip-whoami[/red] (that's the whole point of the "
+                "check). Remove one or the other."
+            )
+            return 2
+        console.print(
+            "[yellow]warning:[/yellow] --skip-whoami: proceeding without "
+            "verifying which account these cookies belong to."
+        )
 
     # ---- rate-cap safety ---------------------------------------------------
     rate = args.rate
@@ -338,7 +358,11 @@ def _run_bulk(args: argparse.Namespace, action_key: str, verb: str) -> int:
     who_line = (
         f"[bold]Account:[/bold] @{screen_name}  "
         if screen_name
-        else "[bold]Account:[/bold] (dry-run, cookies not verified)  "
+        else (
+            "[bold]Account:[/bold] [yellow](skipped whoami)[/yellow]  "
+            if not args.dry_run
+            else "[bold]Account:[/bold] (dry-run, cookies not verified)  "
+        )
     )
     dup_line = f"  [dim](deduped {dup_count} duplicates)[/dim]" if dup_count else ""
     console.print(
@@ -354,9 +378,10 @@ def _run_bulk(args: argparse.Namespace, action_key: str, verb: str) -> int:
     # ---- confirmation ------------------------------------------------------
     if not args.dry_run and not args.yes:
         est_mins = (len(ids) / max(rate, 0.01)) / 60.0
+        who = f"@{screen_name}" if screen_name else "your account (identity not verified)"
         console.print(
             f"\n[bold red]This will run {action.name} on {len(ids)} "
-            f"tweets from @{screen_name}.[/bold red]\n"
+            f"tweets from {who}.[/bold red]\n"
             f"Estimated duration: ~{est_mins:.1f} min at {rate}/s. "
             "Deleted tweets [bold]cannot be recovered[/bold]."
         )
@@ -468,6 +493,15 @@ def _add_bulk_flags(sp: argparse.ArgumentParser, default_log: str) -> None:
         action="store_true",
         help=(
             f"allow --rate above the {RATE_SAFETY_CEILING}/s safety ceiling"
+        ),
+    )
+    sp.add_argument(
+        "--skip-whoami",
+        action="store_true",
+        help=(
+            "skip the account-identity check before running. Use ONLY "
+            "when X has broken the REST endpoints we rely on; you lose "
+            "the --expect-account safety net."
         ),
     )
     resume = sp.add_mutually_exclusive_group()
