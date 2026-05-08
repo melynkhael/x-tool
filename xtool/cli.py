@@ -24,14 +24,19 @@ from rich.progress import (
 from rich.table import Table
 
 from . import __version__
-from .deleter import (
+from .actions import (
+    ActionStats,
     Credentials,
-    DELETE_QUERY_ID,
-    DeleteStats,
-    bulk_delete,
+    bulk_action,
+    get_action,
+)
+from .discovery import (
+    CACHE_PATH as DISCOVERY_CACHE_PATH,
+    FALLBACK_QUERY_IDS,
+    discover_query_ids,
 )
 from .filters import FilterOpts, apply_filter, classify, load_keep_ids, parse_created_at
-from .parser import iter_tweets, read_jsonl, write_jsonl
+from .parser import iter_likes, iter_tweets, read_jsonl, write_jsonl
 
 
 COOKIES_PATH = Path(os.path.expanduser("~/.xtool/cookies.json"))
@@ -42,9 +47,11 @@ console = Console()
 # subcommand: parse
 # ---------------------------------------------------------------------------
 def cmd_parse(args: argparse.Namespace) -> int:
-    out = args.output or "tweets.jsonl"
-    n = write_jsonl(iter_tweets(args.archive), out)
-    console.print(f"[green]wrote[/green] {n} tweets -> {out}")
+    out = args.output or ("likes.jsonl" if args.likes else "tweets.jsonl")
+    source = iter_likes(args.archive) if args.likes else iter_tweets(args.archive)
+    n = write_jsonl(source, out)
+    label = "likes" if args.likes else "tweets"
+    console.print(f"[green]wrote[/green] {n} {label} -> {out}")
     return 0
 
 
@@ -156,7 +163,27 @@ def cmd_login(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
-# subcommand: delete
+# subcommand: discover
+# ---------------------------------------------------------------------------
+def cmd_discover(args: argparse.Namespace) -> int:
+    ids = discover_query_ids(refresh=args.refresh, offline=args.offline)
+    table = Table(title="GraphQL query IDs", show_header=True, header_style="bold")
+    table.add_column("operation", style="cyan")
+    table.add_column("query_id", style="bold")
+    table.add_column("source")
+    for op in sorted(ids):
+        qid = ids[op]
+        source = (
+            "live" if qid != FALLBACK_QUERY_IDS.get(op) else "fallback"
+        )
+        table.add_row(op, qid, source)
+    console.print(table)
+    console.print(f"[dim]cache: {DISCOVERY_CACHE_PATH}[/dim]")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# subcommand: delete / unretweet / unlike (shared code)
 # ---------------------------------------------------------------------------
 def _load_credentials(args: argparse.Namespace) -> Credentials | None:
     if args.auth_token and args.ct0:
@@ -168,7 +195,7 @@ def _load_credentials(args: argparse.Namespace) -> Credentials | None:
 
 
 def _iter_ids(path: str) -> Iterable[str]:
-    # Accept either a JSONL of tweets or a plain text file of ids.
+    """Accept either a JSONL of tweet/like objects or plain text ids."""
     with open(path, encoding="utf-8") as fh:
         for line in fh:
             line = line.strip()
@@ -177,7 +204,12 @@ def _iter_ids(path: str) -> Iterable[str]:
             if line.startswith("{"):
                 try:
                     obj = json.loads(line)
-                    tid = str(obj.get("id_str") or obj.get("id") or "")
+                    tid = str(
+                        obj.get("id_str")
+                        or obj.get("id")
+                        or obj.get("tweetId")
+                        or ""
+                    )
                     if tid:
                         yield tid
                 except ValueError:
@@ -186,7 +218,7 @@ def _iter_ids(path: str) -> Iterable[str]:
                 yield line
 
 
-def cmd_delete(args: argparse.Namespace) -> int:
+def _run_bulk(args: argparse.Namespace, action_key: str, verb: str) -> int:
     creds = _load_credentials(args)
     if creds is None and not args.dry_run:
         console.print(
@@ -199,19 +231,23 @@ def cmd_delete(args: argparse.Namespace) -> int:
 
     ids = list(_iter_ids(args.input))
     if not ids:
-        console.print("[yellow]nothing to do: 0 tweet ids[/yellow]")
+        console.print("[yellow]nothing to do: 0 ids[/yellow]")
         return 0
 
+    action = get_action(action_key)
+    qid_override = getattr(args, "query_id", None)
+    query_id = qid_override or action.query_id(offline=args.offline)
+
     console.print(
-        f"[bold]Target:[/bold] {len(ids)} tweets  "
+        f"[bold]Action:[/bold] {action.name}  "
+        f"[bold]Target:[/bold] {len(ids)}  "
         f"[bold]Rate:[/bold] {args.rate}/s  "
         f"[bold]Dry-run:[/bold] {args.dry_run}  "
-        f"[bold]Resume:[/bold] {args.resume}"
+        f"[bold]Resume:[/bold] {args.resume}  "
+        f"[bold]queryId:[/bold] {query_id}"
     )
 
-    query_id = os.environ.get("XTOOL_DELETE_QUERY_ID", DELETE_QUERY_ID)
-
-    stats: DeleteStats
+    stats: ActionStats
     with Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
@@ -221,21 +257,22 @@ def cmd_delete(args: argparse.Namespace) -> int:
         console=console,
         transient=False,
     ) as bar:
-        task = bar.add_task("deleting", total=len(ids))
+        task = bar.add_task(verb, total=len(ids))
 
         def on_progress(s, tid, outcome):
             bar.update(
                 task,
                 advance=1,
                 description=(
-                    f"del={s.deleted} gone={s.already_gone} "
+                    f"ok={s.succeeded} gone={s.already_gone} "
                     f"fail={s.failed} skip={s.skipped}"
                 ),
             )
 
-        stats = bulk_delete(
+        stats = bulk_action(
             ids,
             creds,
+            action,
             rate=args.rate,
             dry_run=args.dry_run,
             log_path=args.log,
@@ -246,28 +283,79 @@ def cmd_delete(args: argparse.Namespace) -> int:
 
     console.print(
         "\n[bold green]done[/bold green]  "
-        f"deleted={stats.deleted}  already_gone={stats.already_gone}  "
+        f"{action.past_tense}={stats.succeeded}  "
+        f"{action.gone_tense}={stats.already_gone}  "
         f"failed={stats.failed}  skipped={stats.skipped}  "
         f"attempted={stats.attempted}"
     )
     return 0 if stats.failed == 0 else 1
 
 
+def cmd_delete(args: argparse.Namespace) -> int:
+    return _run_bulk(args, "delete", "deleting")
+
+
+def cmd_unretweet(args: argparse.Namespace) -> int:
+    return _run_bulk(args, "unretweet", "unretweeting")
+
+
+def cmd_unlike(args: argparse.Namespace) -> int:
+    return _run_bulk(args, "unlike", "unliking")
+
+
 # ---------------------------------------------------------------------------
 # argparse wiring
 # ---------------------------------------------------------------------------
+def _add_bulk_flags(sp: argparse.ArgumentParser, default_log: str) -> None:
+    """Shared flags for delete / unretweet / unlike subcommands."""
+    sp.add_argument(
+        "input", help="JSONL of tweets/likes or plain-text file with one id per line"
+    )
+    sp.add_argument("--auth-token", help="X auth_token cookie")
+    sp.add_argument("--ct0", help="X ct0 cookie (CSRF)")
+    sp.add_argument("--cookies-file", help=f"override default {COOKIES_PATH}")
+    sp.add_argument("--rate", type=float, default=1.0, help="requests/sec (default 1)")
+    sp.add_argument("--dry-run", action="store_true", help="don't actually hit X")
+    sp.add_argument("--log", default=default_log, help="progress log file")
+    sp.add_argument(
+        "--query-id",
+        help="pin the GraphQL query id (overrides discovery and fallback)",
+    )
+    sp.add_argument(
+        "--offline",
+        action="store_true",
+        help="don't fetch x.com to auto-discover query ids; use cache/fallback",
+    )
+    resume = sp.add_mutually_exclusive_group()
+    resume.add_argument(
+        "--resume",
+        dest="resume",
+        action="store_true",
+        default=True,
+        help="skip ids already in the log (default)",
+    )
+    resume.add_argument(
+        "--no-resume", dest="resume", action="store_false", help="disable resume"
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="xtool",
-        description="Bulk-delete tweets from your X archive on Termux/Linux.",
+        description="Bulk-delete tweets, undo retweets and unlike from your X archive.",
     )
     p.add_argument("--version", action="version", version=f"xtool {__version__}")
     sub = p.add_subparsers(dest="command", required=True)
 
     # parse
-    sp = sub.add_parser("parse", help="convert tweet.js archive to JSONL")
-    sp.add_argument("archive", help="path to tweets.js / tweet.js")
-    sp.add_argument("-o", "--output", help="output JSONL (default tweets.jsonl)")
+    sp = sub.add_parser("parse", help="convert tweets.js / like.js archive to JSONL")
+    sp.add_argument("archive", help="path to tweets.js, tweet.js or like.js")
+    sp.add_argument("-o", "--output", help="output JSONL (auto-named if omitted)")
+    sp.add_argument(
+        "--likes",
+        action="store_true",
+        help="parse a like.js file instead of tweets.js",
+    )
     sp.set_defaults(func=cmd_parse)
 
     # stats
@@ -300,29 +388,43 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("login", help="store X cookies in ~/.xtool/cookies.json")
     sp.set_defaults(func=cmd_login)
 
+    # discover
+    sp = sub.add_parser(
+        "discover",
+        help="auto-discover GraphQL query IDs from x.com's JS bundle",
+    )
+    sp.add_argument(
+        "--refresh",
+        action="store_true",
+        help="ignore the cache and fetch live",
+    )
+    sp.add_argument(
+        "--offline",
+        action="store_true",
+        help="don't hit the network; show cache or fallback only",
+    )
+    sp.set_defaults(func=cmd_discover)
+
     # delete
     sp = sub.add_parser("delete", help="delete every tweet id in the input file")
-    sp.add_argument(
-        "input", help="JSONL of tweets or plain-text file with one id per line"
-    )
-    sp.add_argument("--auth-token", help="X auth_token cookie")
-    sp.add_argument("--ct0", help="X ct0 cookie (CSRF)")
-    sp.add_argument("--cookies-file", help=f"override default {COOKIES_PATH}")
-    sp.add_argument("--rate", type=float, default=1.0, help="requests/sec (default 1)")
-    sp.add_argument("--dry-run", action="store_true", help="don't actually delete")
-    sp.add_argument("--log", default="deleted.jsonl", help="progress log file")
-    resume = sp.add_mutually_exclusive_group()
-    resume.add_argument(
-        "--resume",
-        dest="resume",
-        action="store_true",
-        default=True,
-        help="skip ids already in the log (default)",
-    )
-    resume.add_argument(
-        "--no-resume", dest="resume", action="store_false", help="disable resume"
-    )
+    _add_bulk_flags(sp, default_log="deleted.jsonl")
     sp.set_defaults(func=cmd_delete)
+
+    # unretweet
+    sp = sub.add_parser(
+        "unretweet",
+        help="undo retweets for every source-tweet id in the input file",
+    )
+    _add_bulk_flags(sp, default_log="unretweeted.jsonl")
+    sp.set_defaults(func=cmd_unretweet)
+
+    # unlike
+    sp = sub.add_parser(
+        "unlike",
+        help="remove your like from every tweet id in the input file",
+    )
+    _add_bulk_flags(sp, default_log="unliked.jsonl")
+    sp.set_defaults(func=cmd_unlike)
 
     return p
 
