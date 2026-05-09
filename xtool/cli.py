@@ -244,11 +244,19 @@ def cmd_resolve_retweets(args: argparse.Namespace) -> int:
         console.print(f"[green]@{handle}[/green] = user_id [bold]{user_id}[/bold]")
 
     out_path = Path(args.output) if args.output else Path("live-retweets.jsonl")
+    debug_path: Path | None = None
+    if args.debug:
+        debug_path = (
+            Path(args.debug_file)
+            if args.debug_file
+            else out_path.with_suffix(out_path.suffix + ".debug.jsonl")
+        )
 
     console.print(
         f"[bold]Walking timeline[/bold] user_id={user_id}  "
         f"max={args.max_tweets}  page_size={args.page_size}  "
         f"rate={args.rate}/s  out={out_path}"
+        + (f"  debug={debug_path}" if debug_path else "")
     )
 
     count = 0
@@ -271,6 +279,7 @@ def cmd_resolve_retweets(args: argparse.Namespace) -> int:
                 rate=args.rate,
                 offline=args.offline,
                 on_page=on_page,
+                debug_path=debug_path,
             ):
                 fh.write(json.dumps(rt, ensure_ascii=False) + "\n")
                 fh.flush()
@@ -295,6 +304,17 @@ def cmd_resolve_retweets(args: argparse.Namespace) -> int:
             "the handle/user_id. You can also run with a larger "
             "--max-tweets if your timeline has a lot of originals first."
         )
+        if debug_path and debug_path.exists() and debug_path.stat().st_size > 0:
+            console.print(
+                f"[yellow]debug dump written to {debug_path}[/yellow] "
+                "-- inspect the raw timeline instructions to see which "
+                "entry shape x.com is returning."
+            )
+        elif not args.debug:
+            console.print(
+                "[dim]Tip: rerun with --debug to dump the raw timeline "
+                "entries for diagnosis.[/dim]"
+            )
         return 1
     console.print(
         f"\nNext step:\n"
@@ -736,6 +756,21 @@ def build_parser() -> argparse.ArgumentParser:
         "--offline",
         action="store_true",
         help="don't fetch x.com to auto-discover query ids; use cache/fallback",
+    )
+    sp.add_argument(
+        "--debug",
+        action="store_true",
+        help=(
+            "on any page where entries_seen > 0 but retweets_found == 0, "
+            "dump the raw timeline instructions to a JSONL file for "
+            "schema-drift diagnosis"
+        ),
+    )
+    sp.add_argument(
+        "--debug-file",
+        help=(
+            "path for the --debug dump (default: <output>.debug.jsonl)"
+        ),
     )
     sp.set_defaults(func=cmd_resolve_retweets)
 
