@@ -42,20 +42,85 @@ from typing import Optional
 from . import __version__
 
 
-def _find_repo_root(start: Optional[Path] = None) -> Optional[Path]:
-    """Walk up from ``start`` (or the package directory) looking for
-    a ``.git`` directory. Returns the repo root or None.
+def find_git_root(start: Path) -> Optional[Path]:
+    """Walk upward from ``start`` looking for a ``.git`` marker.
 
-    We check ``.git`` is present, rather than calling ``git
-    rev-parse``, because that avoids spawning a subprocess during
-    discovery and works correctly on Termux where ``git`` may not be
-    on PATH even though a clone exists.
+    ``start`` may point at a file or a directory; in either case we
+    begin the search at its containing directory. Returns the first
+    ancestor whose direct child is a ``.git`` entry (file or
+    directory, so submodules and worktrees both work), or ``None`` if
+    no ``.git`` is found all the way up to the filesystem root.
+
+    We intentionally check for the ``.git`` entry on disk rather than
+    shelling out to ``git rev-parse --show-toplevel`` so this helper
+    still works on Termux where ``git`` may not be on PATH even when
+    a checkout is present, and so it never spawns a subprocess during
+    repo discovery.
     """
-    here = Path(start) if start else Path(__file__).resolve().parent
-    for path in (here, *here.parents):
-        if (path / ".git").exists():
-            return path
+    p = Path(start).resolve()
+    if p.is_file():
+        p = p.parent
+    for candidate in (p, *p.parents):
+        if (candidate / ".git").exists():
+            return candidate
     return None
+
+
+def _looks_like_xtool_checkout(root: Path) -> bool:
+    """Cheap sanity check: the candidate repo root must contain an
+    ``xtool/__init__.py`` for it to plausibly be an X-Tool clone.
+
+    This matters for the cwd-fallback branch of :func:`_find_repo_root`
+    -- we never want ``xtool update`` to wander into an unrelated
+    git repo the user happened to be standing in, try to ``git pull``
+    it, and then ``pip install`` it as "xtool". The package-location
+    branch does not need this guard because the file we start from
+    is already our own ``updater.py``.
+    """
+    return (root / "xtool" / "__init__.py").is_file()
+
+
+def _find_repo_root(start: Optional[Path] = None) -> Optional[Path]:
+    """Locate the X-Tool git checkout we should update.
+
+    Strategy:
+
+    1. **Package-location first.** Walk up from this module's file
+       (``updater.py``). When installed with ``pip install -e .``,
+       this lands inside the real checkout. When installed with the
+       non-editable ``pip install .`` the package lives in
+       ``site-packages`` and this walk finds nothing -- that's fine,
+       we fall through to step 2.
+    2. **Current working directory.** Walk up from :func:`os.getcwd`.
+       If the user ran ``xtool update`` from inside ``~/x-tool``
+       (or any subdirectory), this finds the checkout. Gated by
+       :func:`_looks_like_xtool_checkout` so we never try to update
+       an unrelated repo the user happens to be standing in.
+
+    When both candidates resolve, the package-location wins because
+    that is "the one containing the installed package path" -- i.e.
+    the repo the running code actually came from. The ``start``
+    argument exists for tests: it pins the package-location walk to
+    a specific directory so the test can control the outcome.
+    """
+    # --- 1. package-location walk ----------------------------------------
+    origin = Path(start) if start else Path(__file__)
+    pkg_root = find_git_root(origin)
+
+    # --- 2. cwd walk (only if package-location didn't find anything) ----
+    if pkg_root is None:
+        try:
+            cwd = Path(os.getcwd())
+        except (FileNotFoundError, OSError):
+            # getcwd() can legitimately fail if the caller's cwd was
+            # deleted. Just skip the fallback in that case.
+            return None
+        cwd_root = find_git_root(cwd)
+        if cwd_root is not None and _looks_like_xtool_checkout(cwd_root):
+            return cwd_root
+        return None
+
+    return pkg_root
 
 
 def _run(
@@ -119,15 +184,18 @@ def run_update(
     repo = repo_path if repo_path is not None else _find_repo_root()
     if repo is None:
         printer(
-            "X-Tool was not installed from a git checkout, so `xtool "
-            "update` cannot run."
+            "X-Tool cannot auto-update because this install is not "
+            "linked to a local git repository."
         )
+        printer("")
+        printer("Recommended Termux install:")
+        printer("  git clone https://github.com/melynkhael/x-tool.git ~/x-tool")
+        printer("  cd ~/x-tool")
+        printer("  bash install.sh --quiet")
+        printer("")
         printer(
-            "Reinstall it with:"
-        )
-        printer(
-            "  pip install --upgrade "
-            "git+https://github.com/melynkhael/x-tool.git"
+            "Then future updates are just `xtool update` (or "
+            "`cd ~/x-tool && git pull && bash install.sh --quiet`)."
         )
         return 2
 

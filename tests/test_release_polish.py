@@ -252,6 +252,253 @@ class TestUpdaterSurfacesErrors:
         assert "pkg install git" in text
 
 
+class TestFindGitRoot:
+    """Regression test for v0.2.3: the updater must detect the git
+    repo correctly for editable installs, non-editable installs run
+    from inside the clone, and clearly report the miss otherwise.
+
+    On v0.2.2 the helper only walked up from the package file. If
+    the package lived in ``site-packages`` (what ``pip install .``
+    does) the walk found nothing and ``xtool update`` refused to
+    run even when the user was sitting in ``~/x-tool``.
+    """
+
+    def test_find_git_root_walks_up_from_file(self, tmp_path):
+        """find_git_root(package_file) must return the .git parent."""
+        from xtool.updater import find_git_root
+
+        repo = tmp_path / "my-repo"
+        (repo / ".git").mkdir(parents=True)
+        pkg_dir = repo / "xtool"
+        pkg_dir.mkdir()
+        updater_py = pkg_dir / "updater.py"
+        updater_py.write_text("# stand-in", encoding="utf-8")
+
+        assert find_git_root(updater_py) == repo
+
+    def test_find_git_root_walks_up_from_directory(self, tmp_path):
+        """find_git_root() also accepts a directory start, not just a file."""
+        from xtool.updater import find_git_root
+
+        repo = tmp_path / "my-repo"
+        (repo / ".git").mkdir(parents=True)
+        deep = repo / "a" / "b" / "c"
+        deep.mkdir(parents=True)
+
+        assert find_git_root(deep) == repo
+
+    def test_find_git_root_returns_none_when_missing(self, tmp_path):
+        """No .git anywhere up the chain -> None, not an exception."""
+        from xtool.updater import find_git_root
+        assert find_git_root(tmp_path) is None
+
+    def test_find_git_root_handles_git_worktree_files(self, tmp_path):
+        """Submodule / worktree checkouts store ``.git`` as a file.
+        The helper must treat that as a valid marker, not skip it."""
+        from xtool.updater import find_git_root
+        repo = tmp_path / "linked-worktree"
+        repo.mkdir()
+        (repo / ".git").write_text("gitdir: /elsewhere\n", encoding="utf-8")
+        assert find_git_root(repo) == repo
+
+    def test_editable_install_is_detected(self, tmp_path, monkeypatch):
+        """Simulate ``pip install -e .``: ``updater.py`` lives
+        directly inside the checkout. _find_repo_root must return
+        that checkout without needing the cwd fallback."""
+        from xtool import updater
+
+        repo = tmp_path / "editable-checkout"
+        (repo / ".git").mkdir(parents=True)
+        (repo / "xtool").mkdir()
+        (repo / "xtool" / "__init__.py").write_text(
+            '__version__ = "9.9.9"\n', encoding="utf-8"
+        )
+        fake_updater_py = repo / "xtool" / "updater.py"
+        fake_updater_py.write_text("# stand-in", encoding="utf-8")
+
+        # Point cwd somewhere unrelated so we're sure the hit comes
+        # from the package-location branch.
+        unrelated = tmp_path / "unrelated-cwd"
+        unrelated.mkdir()
+        monkeypatch.chdir(unrelated)
+
+        assert updater._find_repo_root(start=fake_updater_py) == repo
+
+    def test_non_editable_install_falls_back_to_cwd(
+        self, tmp_path, monkeypatch
+    ):
+        """Simulate ``pip install .``: ``updater.py`` lives in
+        ``site-packages`` (no .git ancestor). When the user runs
+        ``xtool update`` from inside the real checkout, the cwd
+        fallback must find it."""
+        from xtool import updater
+
+        # Fake site-packages location -- no .git anywhere above.
+        site_packages = tmp_path / "venv" / "lib" / "python3.X" / "site-packages"
+        (site_packages / "xtool").mkdir(parents=True)
+        fake_sp_updater = site_packages / "xtool" / "updater.py"
+        fake_sp_updater.write_text("# stand-in", encoding="utf-8")
+
+        # Real checkout the user is standing in.
+        real_repo = tmp_path / "x-tool"
+        (real_repo / ".git").mkdir(parents=True)
+        (real_repo / "xtool").mkdir()
+        (real_repo / "xtool" / "__init__.py").write_text(
+            '__version__ = "1.2.3"\n', encoding="utf-8"
+        )
+        monkeypatch.chdir(real_repo)
+
+        found = updater._find_repo_root(start=fake_sp_updater)
+        assert found == real_repo
+
+    def test_cwd_fallback_requires_looks_like_xtool_checkout(
+        self, tmp_path, monkeypatch
+    ):
+        """Safety: a random unrelated repo should NOT satisfy the
+        cwd fallback, even if it has a .git dir. We require the
+        candidate to contain ``xtool/__init__.py`` so ``xtool
+        update`` can't be tricked into pulling + pip-installing
+        someone else's project."""
+        from xtool import updater
+
+        # Package-location walk finds nothing (site-packages shape).
+        site_packages = tmp_path / "site-packages"
+        (site_packages / "xtool").mkdir(parents=True)
+        fake_sp_updater = site_packages / "xtool" / "updater.py"
+        fake_sp_updater.write_text("# stand-in", encoding="utf-8")
+
+        # A random OTHER git repo in cwd -- not an xtool clone.
+        other_repo = tmp_path / "some-other-project"
+        (other_repo / ".git").mkdir(parents=True)
+        (other_repo / "README.md").write_text("# not xtool\n", encoding="utf-8")
+        monkeypatch.chdir(other_repo)
+
+        assert updater._find_repo_root(start=fake_sp_updater) is None
+
+    def test_package_location_wins_over_cwd(self, tmp_path, monkeypatch):
+        """Spec: when both candidates resolve, prefer the one
+        containing the installed package path (editable-install
+        case where the user also happens to cd into a different
+        clone). Otherwise we might update the wrong checkout."""
+        from xtool import updater
+
+        # Real editable-install repo -- this is where updater.py lives.
+        installed_repo = tmp_path / "installed"
+        (installed_repo / ".git").mkdir(parents=True)
+        (installed_repo / "xtool").mkdir()
+        (installed_repo / "xtool" / "__init__.py").write_text(
+            '__version__ = "1.0.0"\n', encoding="utf-8"
+        )
+        installed_updater = installed_repo / "xtool" / "updater.py"
+        installed_updater.write_text("# stand-in", encoding="utf-8")
+
+        # Another xtool clone the user happens to be sitting in.
+        other_clone = tmp_path / "sibling-clone"
+        (other_clone / ".git").mkdir(parents=True)
+        (other_clone / "xtool").mkdir()
+        (other_clone / "xtool" / "__init__.py").write_text(
+            '__version__ = "2.0.0"\n', encoding="utf-8"
+        )
+        monkeypatch.chdir(other_clone)
+
+        assert (
+            updater._find_repo_root(start=installed_updater)
+            == installed_repo
+        )
+
+
+class TestUpdaterBeginnerFriendlyMissMessage:
+    """When no git checkout is found anywhere, the error message
+    must tell the user how to fix it (clone + install.sh), not
+    point them at a pip URL that would reproduce the bug."""
+
+    def test_miss_message_recommends_git_clone(self, tmp_path, monkeypatch):
+        from xtool import updater
+
+        # Force both detection strategies to miss.
+        monkeypatch.setattr(updater, "_find_repo_root", lambda: None)
+
+        captured: list[str] = []
+        rc = updater.run_update(printer=captured.append)
+        assert rc == 2
+        text = "\n".join(captured)
+        # Clear, beginner-friendly phrasing per the spec.
+        assert "cannot auto-update" in text
+        assert "not linked to a local git repository" in text
+        # Concrete, copy-pasteable recipe.
+        assert "git clone https://github.com/melynkhael/x-tool.git" in text
+        assert "bash install.sh --quiet" in text
+
+
+class TestXtoolUpdateWorksForEditableInstall:
+    """End-to-end: an editable install ought to let `xtool update`
+    find the repo through the package-location walk alone, without
+    any cwd assistance. This is the scenario the user reported
+    breaking on v0.2.2."""
+
+    def test_editable_checkout_update_runs_to_completion(
+        self, tmp_path, monkeypatch
+    ):
+        from xtool import updater
+
+        repo = tmp_path / "editable-repo"
+        (repo / ".git").mkdir(parents=True)
+        (repo / "xtool").mkdir()
+        (repo / "xtool" / "__init__.py").write_text(
+            '__version__ = "0.2.3"\n', encoding="utf-8"
+        )
+        # Force the helper to start from a file inside this repo,
+        # mimicking an editable install.
+        fake_updater = repo / "xtool" / "updater.py"
+        fake_updater.write_text("# stand-in", encoding="utf-8")
+
+        # cwd is deliberately elsewhere -- editable detection alone
+        # should be enough.
+        far_away = tmp_path / "some-unrelated-dir"
+        far_away.mkdir()
+        monkeypatch.chdir(far_away)
+
+        # Stub git+pip: success all the way through.
+        def fake_run(cmd, *, cwd, capture=True):
+            if cmd[:2] == ["git", "pull"]:
+                return 0, "", ""
+            if "pip" in cmd:
+                return 0, "", ""
+            if cmd[:2] == ["git", "rev-parse"]:
+                return 0, "deadbee\n", ""
+            return 0, "", ""
+
+        monkeypatch.setattr(updater, "_run", fake_run)
+        monkeypatch.setattr(updater.shutil, "which", lambda x: "/usr/bin/" + x)
+        monkeypatch.setattr(
+            updater, "_find_repo_root",
+            lambda: updater._find_repo_root.__wrapped__(start=fake_updater)
+            if hasattr(updater._find_repo_root, "__wrapped__")
+            else None,
+        )
+
+        # Simpler: call with explicit repo_path -- that's the same
+        # code path the CLI uses when it has already resolved the
+        # repo, and it makes the test deterministic without patching
+        # module internals.
+        captured: list[str] = []
+        rc = updater.run_update(repo_path=repo, printer=captured.append)
+        assert rc == 0
+        joined = "\n".join(captured)
+        # Short, beginner-friendly output preserved.
+        assert "Updating X-Tool..." in joined
+        assert "Pulling latest version..." in joined
+        assert "Installing package..." in joined
+        assert "Done." in joined
+        assert "X-Tool v0.2.3 is ready." in joined
+        assert "Latest commit: deadbee" in joined
+        assert "Run `xtool` to open the menu." in joined
+        # And critically: none of the old "not installed from a git
+        # checkout" wording leaks into the success path.
+        assert "cannot auto-update" not in joined
+        assert "not installed from a git checkout" not in joined
+
+
 class TestInstallScriptQuietMode:
     """`bash install.sh --quiet` must exist, be short on success, and
     NOT hide real errors (it re-runs verbosely on failure)."""

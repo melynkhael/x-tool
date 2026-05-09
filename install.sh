@@ -139,16 +139,22 @@ if [ "$quiet" -eq 1 ]; then
     # failure we print it and exit non-zero so beginners see the real
     # error. Using _make_err_file avoids the old /tmp hardcode that
     # broke on Termux where /tmp does not exist.
+    #
+    # We install with -e (editable) so the package stays rooted in
+    # the git checkout -- that's what makes `xtool update` able to
+    # find the repo later via its own source file. A non-editable
+    # install would copy xtool/ into site-packages and `xtool update`
+    # would have to fall back to cwd detection.
     err_file="$(_make_err_file)"
     install_ok=0
-    if "$PY" -m pip install --upgrade --disable-pip-version-check -q . 2>"$err_file"; then
+    if "$PY" -m pip install -e . --upgrade --disable-pip-version-check -q 2>"$err_file"; then
         install_ok=1
     elif command -v pip >/dev/null 2>&1; then
         # Fallback path for Termux builds that expose pip only as a
         # standalone binary (no `python -m pip`). Capture its stderr
         # to the same file so failures from either attempt are
         # surfaced together.
-        if pip install --upgrade --disable-pip-version-check -q . 2>>"$err_file"; then
+        if pip install -e . --upgrade --disable-pip-version-check -q 2>>"$err_file"; then
             install_ok=1
         fi
     fi
@@ -161,7 +167,7 @@ if [ "$quiet" -eq 1 ]; then
             say "  (pip produced no error output; rerunning verbosely for diagnosis)"
             # Keep the err_file around for the user to inspect even
             # after the verbose rerun writes to the terminal.
-            "$PY" -m pip install --upgrade --disable-pip-version-check . || true
+            "$PY" -m pip install -e . --upgrade --disable-pip-version-check || true
         fi
         say ""
         say "Error log: $err_file"
@@ -184,11 +190,13 @@ if [ "$quiet" -eq 1 ]; then
     say "Run \`xtool\` to open the menu."
 else
     note "==> Installing xtool"
-    "$PY" -m pip install --upgrade --disable-pip-version-check . || {
+    # -e (editable) keeps the package rooted in this checkout so
+    # `xtool update` can locate the git repo later.
+    "$PY" -m pip install -e . --upgrade --disable-pip-version-check || {
         # Some Termux builds expose pip as a standalone binary but not as
         # `python -m pip`. Fall back.
         if command -v pip >/dev/null 2>&1; then
-            pip install --upgrade --disable-pip-version-check .
+            pip install -e . --upgrade --disable-pip-version-check
         else
             echo "ERROR: could not invoke pip. On Termux run 'pkg install python-pip' first." >&2
             exit 1
