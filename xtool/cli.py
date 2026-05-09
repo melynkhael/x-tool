@@ -703,6 +703,10 @@ def cmd_update(args: argparse.Namespace) -> int:
 def cmd_whoami(args: argparse.Namespace) -> int:
     """Show the current account identity from saved cookies.
 
+    Default output hides the numeric user ID so the command output
+    is safe to paste into screenshots / issues. Pass
+    ``--show-user-id`` when you specifically need it.
+
     Exits 0 when the identity is verified, 1 when cookies are present
     but verification is partial (the user can still use the tool, but
     should be aware safety checks are degraded), and 2 when no cookies
@@ -710,13 +714,41 @@ def cmd_whoami(args: argparse.Namespace) -> int:
     login state cleanly.
     """
     from . import auth as _auth
+    from . import identity_store
     from .ui import print_identity_banner
 
     cookies_path = Path(args.cookies_file) if args.cookies_file else COOKIES_PATH
     identity = _auth.verify_from_cookie_file(
         cookies_path, expect_handle=args.expect_handle
     )
-    print_identity_banner(identity)
+
+    # Persist safe metadata so future `xtool` invocations can show
+    # `Account: @handle` without re-probing. Two distinct writes:
+    # * verified + we know the handle -> record as "last verified".
+    # * user supplied --expect-handle but we couldn't verify ->
+    #   still remember the expected_handle, so a later retry has
+    #   a default handle to try. Writes that fail (read-only fs,
+    #   etc.) are surfaced but not fatal; the command itself still
+    #   succeeded.
+    try:
+        if identity.status == "verified" and identity.handle:
+            identity_store.record_verified(
+                handle=identity.handle,
+                user_id=identity.user_id,
+                source=identity.source,
+            )
+        elif args.expect_handle:
+            identity_store.remember_expected_handle(
+                args.expect_handle.lstrip("@").strip().lower()
+                or args.expect_handle
+            )
+    except OSError as exc:
+        console.print(f"[yellow]warning:[/yellow] could not save identity metadata: {exc}")
+
+    print_identity_banner(
+        identity,
+        show_user_id=bool(getattr(args, "show_user_id", False)),
+    )
     if identity.status == "verified":
         return 0
     if identity.status == "partial":
@@ -804,6 +836,15 @@ def build_parser() -> argparse.ArgumentParser:
                 "down we can still verify the cookies by resolving this "
                 "handle via GraphQL and matching it against the twid "
                 "cookie user_id"
+            ),
+        )
+        sp.add_argument(
+            "--show-user-id",
+            action="store_true",
+            help=(
+                "include the numeric X user ID in the output. Hidden by "
+                "default so command output is safe to paste into "
+                "screenshots or issues."
             ),
         )
         sp.set_defaults(func=cmd_whoami)

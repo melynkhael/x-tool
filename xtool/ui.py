@@ -65,32 +65,64 @@ def format_identity_line(identity: "Identity | None") -> Text:
     state. Always returns a Text object so callers can wrap it in a
     Panel or print it inline without losing styling.
 
+    Privacy contract
+    ----------------
+    This function MUST NOT render the numeric ``user_id`` in any
+    branch. The menu header is visible on every prompt and users
+    routinely screenshot it; leaking a permanent account identifier
+    there was the v0.2.3 bug this function was rewritten to fix.
+
     The text is colour-coded:
-        verified                   -> green
-        partial w/ handle or twid  -> yellow (still useful information)
-        partial w/ cookies only    -> yellow ("identity not verified")
-        none                       -> dim ("not logged in")
+
+    * verified                      -> green ``@handle`` (no suffix).
+    * stale-verified / recheck fail -> yellow "last verified, recheck
+                                       failed" suffix after the remembered
+                                       handle.
+    * partial w/ handle             -> yellow ``@handle (not verified)``.
+    * partial w/ twid only          -> yellow "twid found, handle not
+                                       verified".
+    * partial w/ cookies only       -> yellow "cookies saved, identity
+                                       not verified".
+    * none                          -> dim "not logged in".
     """
     t = Text()
     t.append("Account: ", style="bold")
     if identity is None or identity.status == "none":
         t.append("not logged in", style="dim")
         return t
-    if identity.status == "verified" and identity.handle:
-        t.append(f"@{identity.handle}", style="bold green")
-        t.append(" verified", style="green")
+
+    # --- stale-verified / recheck failed ---------------------------------
+    if (
+        identity.status == "partial"
+        and identity.recheck_failed
+        and identity.last_verified_handle
+    ):
+        t.append(f"@{identity.last_verified_handle}", style="bold yellow")
+        t.append(" last verified, recheck failed", style="yellow")
         return t
-    # partial branches
+
+    # --- verified (clean, no "verified" word) ----------------------------
+    if identity.status == "verified" and identity.handle:
+        # Spec: the green handle IS the verified signal. We deliberately
+        # do NOT append the word "verified" any more; it added visual
+        # clutter without communicating anything the colour didn't.
+        t.append(f"@{identity.handle}", style="bold green")
+        return t
+
+    # --- partial branches ------------------------------------------------
     if identity.handle:
         t.append(f"@{identity.handle}", style="bold yellow")
-        t.append(" (identity not verified)", style="yellow")
-    elif identity.user_id:
-        # Spec: menu header when only the twid is known should read
-        # "Account: user id <id> from twid" -- show the user_id
-        # explicitly so the user knows we *do* have something concrete.
-        t.append(f"user id {identity.user_id} from twid", style="yellow")
-    else:
-        t.append("cookies saved, identity not verified", style="yellow")
+        t.append(" (not verified)", style="yellow")
+        return t
+    if identity.user_id:
+        # We know a user_id from the twid cookie, but we have not
+        # confirmed a handle. Previously this line printed the raw
+        # numeric id; the v0.2.4 rule is "never show user_id in the
+        # menu", so the line now describes *what* we have without
+        # actually leaking the value.
+        t.append("twid found, handle not verified", style="yellow")
+        return t
+    t.append("cookies saved, identity not verified", style="yellow")
     return t
 
 
@@ -102,25 +134,34 @@ def print_identity_status(identity: "Identity | None") -> None:
     console.print(line)
 
 
-def print_identity_banner(identity: "Identity | None") -> None:
+def print_identity_banner(
+    identity: "Identity | None",
+    *,
+    show_user_id: bool = False,
+) -> None:
     """Post-login welcome / status banner. Multi-line, visually distinct
     from the menu-header one-liner.
 
-    Four shapes, one per identity state the tool can reach:
+    ``show_user_id`` controls whether the numeric ``user_id`` is
+    rendered in the verified and twid-only panels. Default is
+    ``False``: ``xtool whoami`` and ``xtool login`` never leak the
+    permanent account id by accident. The ``--show-user-id`` CLI
+    flag flips this to True for power users who specifically want
+    to see it.
 
-    * no cookies saved            -> red "Not logged in." panel
-    * auth_token + ct0 only       -> yellow "Cookies saved, but X
-                                     identity verification failed"
-                                     panel. Mentions that account
-                                     safety checks are disabled and
-                                     recommends dry-run first.
-    * twid known, handle unknown  -> yellow "Cookies saved. User ID
-                                     from twid: N. Handle not
-                                     verified." panel. Suggests
-                                     ``--expect-handle`` to upgrade.
-    * verified                    -> green welcome panel with handle,
-                                     user id, source, and cookies
-                                     path.
+    Five shapes (one per identity state the tool can reach):
+
+    * no cookies saved        -> red "Not logged in." panel.
+    * cookies only            -> yellow "Cookies saved, but X
+                                 identity verification failed" panel.
+    * twid known, no handle   -> yellow "Cookies saved. twid found,
+                                 but handle not verified." panel.
+    * stale-verified          -> yellow "Last verified as @handle,
+                                 recheck failed." panel.
+    * verified                -> green welcome panel with handle,
+                                 verification source, and cookies
+                                 path. user_id only when
+                                 ``show_user_id`` is True.
     """
     from pathlib import Path
     import os
@@ -147,8 +188,6 @@ def print_identity_banner(identity: "Identity | None") -> None:
         body = Text()
         handle = identity.handle or "(unknown)"
         body.append(f"Logged in as @{handle}\n", style="bold green")
-        if identity.user_id:
-            body.append(f"User ID: {identity.user_id}\n", style="green")
         # Describe how we verified, so users understand whether we
         # went through REST, matched a handle via GraphQL, or relied
         # on a twid cookie match.
@@ -159,6 +198,9 @@ def print_identity_banner(identity: "Identity | None") -> None:
         }
         source_human = source_descriptions.get(identity.source, identity.source)
         body.append(f"Verification: {source_human}\n", style="dim")
+        # user_id is behind the opt-in flag; default never leaks it.
+        if show_user_id and identity.user_id:
+            body.append(f"User ID: {identity.user_id}\n", style="dim")
         body.append(f"Cookies saved to {cookies_path}", style="dim")
         panel = Panel(
             body,
@@ -170,22 +212,56 @@ def print_identity_banner(identity: "Identity | None") -> None:
         console.print(panel)
         return
 
+    # --- stale-verified / recheck failed ------------------------------
+    if identity.recheck_failed and identity.last_verified_handle:
+        body = Text()
+        body.append(
+            f"Last verified as @{identity.last_verified_handle}, "
+            "recheck failed.\n",
+            style="bold yellow",
+        )
+        body.append(
+            "Cookies are still saved; X's identity endpoints could "
+            "not confirm the handle just now.\n",
+            style="yellow",
+        )
+        body.append(
+            "Use dry-run first, or run "
+            "`xtool whoami --expect-handle " +
+            identity.last_verified_handle +
+            "` to re-verify.",
+            style="dim",
+        )
+        if identity.detail:
+            body.append(f"\n\n{identity.detail}", style="dim")
+        panel = Panel(
+            body,
+            border_style="yellow",
+            box=box.ROUNDED,
+            expand=False,
+            padding=(0, 2),
+        )
+        console.print(panel)
+        return
+
     # --- partial ------------------------------------------------------
     body = Text()
     if identity.user_id:
-        # Spec: twid-only partial should tell the user what we know and
-        # nudge them toward --expect-handle so they can unlock
-        # verified.
+        # Spec: twid-only partial tells the user what we know and
+        # nudges them toward --expect-handle -- WITHOUT leaking the
+        # numeric user_id. The raw id only appears when the caller
+        # explicitly requested it via ``show_user_id``.
         body.append("Cookies saved.\n", style="bold yellow")
         body.append(
-            f"User ID from twid: {identity.user_id}\n", style="yellow"
+            "twid found, but handle not verified.\n",
+            style="yellow",
         )
-        body.append("Handle not verified.\n", style="yellow")
         body.append(
-            "Use --expect-handle to verify this cookie belongs to a "
-            "specific account.",
+            "Use `xtool whoami --expect-handle yourhandle` to verify.",
             style="dim",
         )
+        if show_user_id:
+            body.append(f"\nUser ID: {identity.user_id}", style="dim")
     else:
         body.append(
             "Cookies saved, but X identity verification failed.\n",

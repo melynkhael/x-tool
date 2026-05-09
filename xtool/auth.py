@@ -64,7 +64,26 @@ from .actions import ActionError, Credentials, build_session, whoami
 
 @dataclass
 class Identity:
-    """Structured result of an identity check."""
+    """Structured result of an identity check.
+
+    Display contract
+    ----------------
+    The numeric ``user_id`` is an *internal* field. UI callers must
+    never render it in default output -- it leaks the account's
+    permanent identifier into screenshots, GitHub issues, etc. See
+    :func:`xtool.ui.format_identity_line` for the opt-in
+    (``show_user_id``) display path.
+
+    ``last_verified_handle`` / ``recheck_failed`` are populated by
+    :func:`verify_from_cookie_file` when the current network probe
+    can't confirm the handle but we have a previously-verified handle
+    on disk. This lets the menu render::
+
+        Account: @veldorakite last verified, recheck failed
+
+    instead of collapsing all network hiccups to the less useful
+    "cookies saved, identity not verified" line.
+    """
 
     status: str  # "verified" | "partial" | "none"
     handle: Optional[str] = None
@@ -72,6 +91,12 @@ class Identity:
     # "rest", "handle-match", "twid", "cookie", or "none".
     source: str = "none"
     detail: str = ""
+    # Populated by verify_from_cookie_file when the live check is
+    # degraded but the identity file says we have trusted it before.
+    # These NEVER override ``status`` / ``handle`` -- they are
+    # supplementary display hints.
+    last_verified_handle: Optional[str] = None
+    recheck_failed: bool = False
 
     @property
     def verified(self) -> bool:
@@ -82,20 +107,44 @@ class Identity:
         return self.status in ("verified", "partial")
 
     def one_liner(self) -> str:
-        """Compact single-line summary for the menu header. Plain text,
-        no styling -- the UI layer wraps this in Rich markup so the
-        same string can be reused in test assertions."""
+        """Compact single-line summary for the menu header.
+
+        Plain text, no styling -- the UI layer wraps this in Rich
+        markup so the same string can be reused in test assertions.
+
+        The user ID is deliberately NEVER included here; the menu
+        header is the highest-exposure surface (visible on every
+        prompt) and we do not want a numeric account identifier
+        showing up in every screenshot.
+        """
+        # Stale-verified state: we trusted a handle before, but the
+        # current probe couldn't reconfirm it (network down, REST
+        # rotated, etc.). Prefer this over the cookie/twid partial
+        # shapes because the "remembered" handle is more useful than
+        # the raw cookie state.
+        if (
+            self.status == "partial"
+            and self.recheck_failed
+            and self.last_verified_handle
+        ):
+            return (
+                f"@{self.last_verified_handle} last verified, recheck failed"
+            )
+
         if self.status == "verified" and self.handle:
-            return f"@{self.handle} verified"
+            # Spec: the clean handle IS the verified indicator. The
+            # word "verified" made the menu look cluttered and
+            # technical; colour/emphasis carries the meaning.
+            return f"@{self.handle}"
+
         if self.status == "partial":
             if self.handle:
                 return f"@{self.handle} (not verified)"
+            # twid present but no confirmed handle. We DO NOT show the
+            # numeric user_id here any more -- it leaked the account's
+            # permanent identifier into every screenshot.
             if self.user_id:
-                # Distinguish the twid-only case explicitly; the menu
-                # header was previously showing this state as "cookies
-                # saved, identity not verified" which hid the fact that
-                # we actually knew the numeric user id.
-                return f"user id {self.user_id} from twid"
+                return "twid found, handle not verified"
             return "cookies saved, identity not verified"
         return "not logged in"
 
@@ -367,7 +416,21 @@ def verify_from_cookie_file(
 ) -> Identity:
     """Load cookies from disk and verify. Returns a ``status="none"``
     Identity on any load error, so callers don't need two exception
-    paths."""
+    paths.
+
+    When ``expect_handle`` is None we fall back to whatever handle the
+    user previously verified (via ``xtool whoami --expect-handle``);
+    this is what lets plain ``xtool`` show ``Account: @handle`` after
+    a previous verification without asking the user to retype their
+    handle every time the menu opens.
+
+    If the live probe ends up in a weaker state than a previously
+    recorded verification, we annotate the returned Identity with
+    ``last_verified_handle`` and ``recheck_failed=True`` so the
+    caller can render the stale-verified state. We deliberately do
+    NOT promote the status to ``verified`` in that case -- safety
+    checks should still reflect what the tool can prove *right now*.
+    """
     from pathlib import Path
 
     p = Path(cookies_path)
@@ -385,4 +448,23 @@ def verify_from_cookie_file(
             source="none",
             detail=f"could not read {p}: {exc}",
         )
-    return verify_identity(creds, expect_handle=expect_handle)
+
+    # Fall back to the persisted expected-handle so repeat launches
+    # don't need --expect-handle. Import lazily to avoid a cycle.
+    from . import identity_store  # local import: keeps module init cheap
+    record = identity_store.load()
+    handle_for_probe = expect_handle or record.expected_handle
+
+    identity = verify_identity(creds, expect_handle=handle_for_probe)
+
+    # If we have a recorded verification and this probe came back
+    # weaker, stamp the identity with the stale-verified annotations
+    # so the UI can render "@handle last verified, recheck failed".
+    if (
+        identity.status == "partial"
+        and not identity.handle
+        and record.last_verified_handle
+    ):
+        identity.last_verified_handle = record.last_verified_handle
+        identity.recheck_failed = True
+    return identity
