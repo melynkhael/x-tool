@@ -810,22 +810,72 @@ def cmd_whoami(args: argparse.Namespace) -> int:
     return 2
 
 
+# ---------------------------------------------------------------------------
+# main --help output
+# ---------------------------------------------------------------------------
+# argparse's auto-generated top-level help wraps badly on narrow Termux
+# terminals: the subcommand list alone is ~15 lines and each description
+# wraps to two or three. We replace the main parser's format_help() with
+# a hand-laid compact layout so beginners see a short, grouped menu.
+# Subcommand-level help (``xtool <cmd> --help``) keeps the default
+# argparse formatter, so the longer explanations still live there --
+# we just moved them from ``help=`` (short listing text) to
+# ``description=`` (full subcommand help text).
+_MAIN_HELP = (
+    "X-Tool - X / Twitter Account Cleanup\n"
+    "\n"
+    "Usage:\n"
+    "  xtool              open menu\n"
+    "  xtool update       update X-Tool\n"
+    "  xtool doctor       security check\n"
+    "  xtool login        save cookies\n"
+    "  xtool whoami       check account\n"
+    "\n"
+    "Main actions:\n"
+    "  xtool parse        convert archive\n"
+    "  xtool stats        show stats\n"
+    "  xtool delete       delete tweets\n"
+    "  xtool unretweet    remove reposts\n"
+    "  xtool unlike       remove likes\n"
+    "\n"
+    "More:\n"
+    "  xtool <cmd> --help   command details\n"
+    "  xtool --version      show version\n"
+)
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="xtool",
         description="Bulk-delete tweets, undo retweets and unlike from your X archive.",
     )
+    # Replace the main parser's help output with our compact layout.
+    # Subparsers keep argparse's default formatter (they're independent
+    # parser instances), so ``xtool <cmd> --help`` is unaffected.
+    p.format_help = lambda: _MAIN_HELP  # type: ignore[method-assign]
     p.add_argument("--version", action="version", version=f"xtool {__version__}")
     sub = p.add_subparsers(dest="command")
 
     # menu / wizard (interactive mode)
-    sp = sub.add_parser("menu", help="interactive guided menu (default)")
+    sp = sub.add_parser(
+        "menu",
+        help="open menu",
+        description="Open the interactive guided menu (default when you run `xtool`).",
+    )
     sp.set_defaults(func=cmd_menu)
-    sp = sub.add_parser("wizard", help="interactive guided menu (alias)")
+    sp = sub.add_parser(
+        "wizard",
+        help="open menu",
+        description="Alias for `xtool menu`.",
+    )
     sp.set_defaults(func=cmd_menu)
 
     # parse
-    sp = sub.add_parser("parse", help="convert tweets.js / like.js archive to JSONL")
+    sp = sub.add_parser(
+        "parse",
+        help="convert archive",
+        description="Convert a tweets.js / tweet.js / like.js archive file to JSONL.",
+    )
     sp.add_argument("archive", help="path to tweets.js, tweet.js or like.js")
     sp.add_argument("-o", "--output", help="output JSONL (auto-named if omitted)")
     sp.add_argument(
@@ -836,12 +886,20 @@ def build_parser() -> argparse.ArgumentParser:
     sp.set_defaults(func=cmd_parse)
 
     # stats
-    sp = sub.add_parser("stats", help="summarize a JSONL of tweets")
+    sp = sub.add_parser(
+        "stats",
+        help="show stats",
+        description="Summarize a JSONL of tweets (total, originals, replies, retweets, date range).",
+    )
     sp.add_argument("input", help="JSONL of tweets")
     sp.set_defaults(func=cmd_stats)
 
     # filter
-    sp = sub.add_parser("filter", help="filter a JSONL of tweets")
+    sp = sub.add_parser(
+        "filter",
+        help="filter archive",
+        description="Filter a JSONL of tweets by date, type, keyword, likes, retweets.",
+    )
     sp.add_argument("input", help="JSONL of tweets")
     sp.add_argument("-o", "--output", help="output JSONL (default filtered.jsonl)")
     sp.add_argument("--from", dest="date_from", help="keep tweets on/after this date")
@@ -862,22 +920,29 @@ def build_parser() -> argparse.ArgumentParser:
     sp.set_defaults(func=cmd_filter)
 
     # login
-    sp = sub.add_parser("login", help="store X cookies in ~/.xtool/cookies.json")
+    sp = sub.add_parser(
+        "login",
+        help="save cookies",
+        description="Store X session cookies (auth_token, ct0, optional twid) in ~/.xtool/cookies.json with chmod 600.",
+    )
     sp.set_defaults(func=cmd_login)
 
     # update
     sp = sub.add_parser(
         "update",
-        help="pull latest X-Tool from GitHub and reinstall (beginner-friendly)",
+        help="update X-Tool",
+        description="Pull the latest X-Tool from GitHub and reinstall in-place (beginner-friendly).",
     )
     sp.set_defaults(func=cmd_update)
 
     # doctor (security / privacy self-check)
     sp = sub.add_parser(
         "doctor",
-        help=(
-            "run a local security/privacy self-check on ~/.xtool, the "
-            "current git checkout, and shell history files"
+        help="security check",
+        description=(
+            "Run a local security/privacy self-check on ~/.xtool, the "
+            "current git checkout, and shell history files. Never "
+            "touches the network and never prints secret values."
         ),
     )
     sp.add_argument(
@@ -893,11 +958,19 @@ def build_parser() -> argparse.ArgumentParser:
     sp.set_defaults(func=cmd_doctor)
 
     # whoami / account
-    for name, helptext in (
-        ("whoami", "show the account xtool thinks you're logged in as"),
-        ("account", "alias for `xtool whoami`"),
+    for name, short_help, long_desc in (
+        (
+            "whoami",
+            "check account",
+            "Show the account xtool thinks you're logged in as, based on the saved cookies.",
+        ),
+        (
+            "account",
+            "check account (alias)",
+            "Alias for `xtool whoami`.",
+        ),
     ):
-        sp = sub.add_parser(name, help=helptext)
+        sp = sub.add_parser(name, help=short_help, description=long_desc)
         sp.add_argument(
             "--cookies-file",
             help=f"override default {COOKIES_PATH}",
@@ -926,9 +999,10 @@ def build_parser() -> argparse.ArgumentParser:
     # resolve-retweets
     sp = sub.add_parser(
         "resolve-retweets",
-        help=(
-            "walk your live profile timeline and write a JSONL of "
-            "source tweet ids ready for 'xtool unretweet'"
+        help="find repost IDs",
+        description=(
+            "Walk your live profile timeline and write a JSONL of "
+            "source tweet ids ready for `xtool unretweet`."
         ),
     )
     sp.add_argument("--handle", help="your X @screen_name")
@@ -980,7 +1054,8 @@ def build_parser() -> argparse.ArgumentParser:
     # discover
     sp = sub.add_parser(
         "discover",
-        help="auto-discover GraphQL query IDs from x.com's JS bundle",
+        help="find query IDs",
+        description="Auto-discover GraphQL query IDs from x.com's JS bundle.",
     )
     sp.add_argument(
         "--refresh",
@@ -995,14 +1070,19 @@ def build_parser() -> argparse.ArgumentParser:
     sp.set_defaults(func=cmd_discover)
 
     # delete
-    sp = sub.add_parser("delete", help="delete every tweet id in the input file")
+    sp = sub.add_parser(
+        "delete",
+        help="delete tweets",
+        description="Delete every tweet id listed in the input file.",
+    )
     _add_bulk_flags(sp, default_log="deleted.jsonl")
     sp.set_defaults(func=cmd_delete)
 
     # unretweet
     sp = sub.add_parser(
         "unretweet",
-        help="undo retweets for every source-tweet id in the input file",
+        help="remove reposts",
+        description="Undo retweets for every source-tweet id in the input file.",
     )
     _add_bulk_flags(sp, default_log="unretweeted.jsonl")
     sp.set_defaults(func=cmd_unretweet)
@@ -1010,7 +1090,8 @@ def build_parser() -> argparse.ArgumentParser:
     # unlike
     sp = sub.add_parser(
         "unlike",
-        help="remove your like from every tweet id in the input file",
+        help="remove likes",
+        description="Remove your like from every tweet id in the input file.",
     )
     _add_bulk_flags(sp, default_log="unliked.jsonl")
     sp.set_defaults(func=cmd_unlike)

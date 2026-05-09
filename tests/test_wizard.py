@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import sys
@@ -69,6 +70,111 @@ class TestCLIMenuWiring:
         result = main([])
         assert called == [True]
         assert result == 0
+
+
+# ── Main --help output: compact, mobile-friendly ──────────────────────────
+
+class TestMainHelpOutput:
+    """Top-level ``xtool --help`` must stay short and readable on a
+    40-column Termux terminal.
+
+    Subcommand help (``xtool <cmd> --help``) is still allowed to be
+    long; those tests only live here for the *main* parser output.
+    """
+
+    def _main_help(self) -> str:
+        return build_parser().format_help()
+
+    def test_help_exits_zero(self):
+        """``xtool --help`` must exit cleanly."""
+        parser = build_parser()
+        with pytest.raises(SystemExit) as exc_info:
+            parser.parse_args(["--help"])
+        assert exc_info.value.code == 0
+
+    def test_main_help_mentions_core_commands(self):
+        """Important beginner commands must still be visible in the top-level help."""
+        out = self._main_help()
+        for token in (
+            "menu",
+            "update",
+            "doctor",
+            "login",
+            "whoami",
+            "delete",
+            "unretweet",
+            "unlike",
+        ):
+            assert token in out, f"main --help should mention {token!r}"
+
+    def test_main_help_title_and_sections(self):
+        """The hand-laid compact layout must be used (not argparse's default)."""
+        out = self._main_help()
+        assert "X-Tool - X / Twitter Account Cleanup" in out
+        assert "Usage:" in out
+        assert "Main actions:" in out
+        # Argparse's default header must NOT appear -- its presence
+        # would mean we regressed to the long auto-generated help.
+        assert "positional arguments:" not in out
+        assert "optional arguments:" not in out
+
+    def test_main_help_is_short_enough_for_mobile(self):
+        """Every line must fit a 40-column Termux terminal without wrapping.
+
+        40 cols is the narrow end of typical Termux default font sizes on
+        small phones. Giving ourselves a small safety margin catches
+        accidental long descriptions creeping back into the top-level
+        listing.
+        """
+        out = self._main_help()
+        long_lines = [line for line in out.splitlines() if len(line) > 40]
+        assert not long_lines, (
+            "main --help lines must be <= 40 chars for Termux; "
+            f"offenders: {long_lines}"
+        )
+
+    def test_main_help_drops_long_legacy_descriptions(self):
+        """No long auto-generated subcommand sentences should leak into main --help.
+
+        These strings come from the previous argparse ``help=`` values
+        and are the exact wraps we were trying to eliminate.
+        """
+        out = self._main_help()
+        forbidden_fragments = (
+            "walk your live profile timeline",
+            "auto-discover GraphQL query IDs",
+            "summarize a JSONL of tweets",
+            "undo retweets for every source-tweet id",
+            "store X cookies in ~/.xtool/cookies.json",
+            "pull latest X-Tool from GitHub",
+            "run a local security/privacy self-check",
+            "show the account xtool thinks you're logged in as",
+        )
+        for frag in forbidden_fragments:
+            assert frag not in out, (
+                f"main --help should not contain long legacy description "
+                f"{frag!r}; keep details in subcommand --help"
+            )
+
+    def test_subcommand_help_still_has_details(self):
+        """Moving long text out of ``help=`` should not lose it -- it
+        must still be reachable via ``xtool <cmd> --help`` through the
+        subparser's ``description``."""
+        parser = build_parser()
+        # format_help() on a specific subparser exposes its description.
+        # We reach in via the internal subparsers action.
+        subparsers_action = None
+        for action in parser._actions:
+            if isinstance(action, argparse._SubParsersAction):
+                subparsers_action = action
+                break
+        assert subparsers_action is not None
+
+        doctor_help = subparsers_action.choices["doctor"].format_help()
+        assert "security/privacy self-check" in doctor_help
+
+        resolve_help = subparsers_action.choices["resolve-retweets"].format_help()
+        assert "live profile timeline" in resolve_help
 
 
 # ── Archive auto-detection ────────────────────────────────────────────────
