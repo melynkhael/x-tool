@@ -119,8 +119,13 @@ def run_menu() -> int:
         # hide the "[0]" suffix because users found it confusing --
         # showing "[0]" next to "Choose" suggests 0 is just one of
         # many options rather than what happens on Enter.
+        #
+        # The prompt text itself stays intentionally terse: the menu
+        # already lists each key (with "0  Exit" and "t  Troubleshooting"
+        # spelled out), so repeating "(0-9, t)" in the prompt just
+        # added noise for beginners.
         choice = ask_choice(
-            "Choose option (0-9, t)",
+            "Choose option",
             valid=[k for k, _ in MENU_ITEMS],
             default="0",
             hide_default=True,
