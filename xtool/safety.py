@@ -38,8 +38,14 @@ def confirm_typed(
     action_name: str,
     count: int,
     account: str | None = None,
+    verified: bool = True,
 ) -> bool:
-    """Require user to type 'yes' for high-risk bulk operations."""
+    """Require user to type 'yes' for high-risk bulk operations.
+
+    When ``verified`` is False, an extra warning makes it crystal clear
+    that xtool could NOT confirm which account the cookies belong to,
+    so the user is gambling that they pasted the right cookies.
+    """
     console.print()
     who = f"@{account}" if account else "your account"
     console.print(
@@ -49,6 +55,19 @@ def confirm_typed(
     console.print(
         "  [bold]Deleted tweets CANNOT be recovered.[/bold]"
     )
+    if not verified:
+        console.print()
+        console.print(
+            "  [bold yellow]Account identity is NOT verified.[/bold yellow]"
+        )
+        console.print(
+            "  [yellow]X did not return an identity for these cookies, so we "
+            "cannot guarantee this is the account you think it is.[/yellow]"
+        )
+        console.print(
+            "  [yellow]Strongly consider running a dry-run first, or aborting "
+            "and refreshing your cookies with `xtool login`.[/yellow]"
+        )
     console.print()
     try:
         raw = input("  Type 'yes' to confirm: ").strip().lower()

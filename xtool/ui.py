@@ -7,13 +7,16 @@ and formatted output so the wizard and CLI share a consistent look.
 from __future__ import annotations
 
 import sys
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 from rich import box
+
+if TYPE_CHECKING:  # pragma: no cover - hint only
+    from .auth import Identity
 
 console = Console()
 
@@ -47,6 +50,112 @@ def print_banner() -> None:
         padding=(0, 2),
     ))
     console.print()
+
+
+# ── Account / identity status ─────────────────────────────────────────────
+
+def format_identity_line(identity: "Identity | None") -> Text:
+    """Render a single-line "Account: ..." summary of the current login
+    state. Always returns a Text object so callers can wrap it in a
+    Panel or print it inline without losing styling.
+
+    The text is colour-coded:
+        verified  -> green
+        partial   -> yellow ("cookies saved, identity not verified")
+        none      -> dim    ("not logged in")
+    """
+    t = Text()
+    t.append("Account: ", style="bold")
+    if identity is None or identity.status == "none":
+        t.append("not logged in", style="dim")
+        return t
+    if identity.status == "verified" and identity.handle:
+        t.append(f"@{identity.handle}", style="bold green")
+        t.append(" verified", style="green")
+        return t
+    # partial, or verified-without-handle.
+    if identity.handle:
+        t.append(f"@{identity.handle}", style="bold yellow")
+        t.append(" (identity not verified)", style="yellow")
+    elif identity.user_id:
+        t.append(
+            f"user_id {identity.user_id}, identity not verified",
+            style="yellow",
+        )
+    else:
+        t.append("cookies saved, identity not verified", style="yellow")
+    return t
+
+
+def print_identity_status(identity: "Identity | None") -> None:
+    """Print the menu-header identity line with leading indent to match
+    the rest of the menu output."""
+    line = Text("  ")
+    line.append_text(format_identity_line(identity))
+    console.print(line)
+
+
+def print_identity_banner(identity: "Identity | None") -> None:
+    """Post-login welcome / status banner. Multi-line, visually distinct
+    from the menu-header one-liner."""
+    from pathlib import Path
+    import os
+
+    cookies_path = Path(os.path.expanduser("~/.xtool/cookies.json"))
+
+    if identity is None or identity.status == "none":
+        panel = Panel(
+            Text.assemble(
+                ("Not logged in.\n", "bold red"),
+                ("Run `xtool login` to save your X session cookies.", "dim"),
+            ),
+            border_style="red",
+            box=box.ROUNDED,
+            expand=False,
+            padding=(0, 2),
+        )
+        console.print(panel)
+        return
+
+    if identity.status == "verified":
+        body = Text()
+        handle = identity.handle or "(unknown)"
+        body.append(f"Logged in as @{handle}\n", style="bold green")
+        if identity.user_id:
+            body.append(f"User ID: {identity.user_id}\n", style="green")
+        body.append(f"Cookies saved to {cookies_path}\n", style="dim")
+        body.append(f"Source: {identity.source}", style="dim")
+        panel = Panel(
+            body,
+            border_style="green",
+            box=box.ROUNDED,
+            expand=False,
+            padding=(0, 2),
+        )
+        console.print(panel)
+        return
+
+    # partial
+    body = Text()
+    body.append("Cookies were saved, but X identity verification failed.\n",
+                style="bold yellow")
+    if identity.user_id:
+        body.append(f"twid user_id: {identity.user_id}\n", style="yellow")
+    body.append(
+        "You may still be able to run actions, but account safety checks are disabled.\n",
+        style="yellow",
+    )
+    body.append("Use dry-run first.", style="dim")
+    if identity.detail:
+        body.append(f"\n\n{identity.detail}", style="dim")
+    panel = Panel(
+        body,
+        border_style="yellow",
+        box=box.ROUNDED,
+        expand=False,
+        padding=(0, 2),
+    )
+    console.print(panel)
 
 
 # ── Menu ──────────────────────────────────────────────────────────────────

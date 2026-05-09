@@ -677,6 +677,30 @@ def cmd_menu(args: argparse.Namespace) -> int:
     return run_menu()
 
 
+def cmd_whoami(args: argparse.Namespace) -> int:
+    """Show the current account identity from saved cookies.
+
+    Exits 0 when the identity is verified, 1 when cookies are present
+    but verification is partial (the user can still use the tool, but
+    should be aware safety checks are degraded), and 2 when no cookies
+    are found at all. This exit-code shape lets shell scripts check
+    login state cleanly.
+    """
+    from . import auth as _auth
+    from .ui import print_identity_banner
+
+    cookies_path = Path(args.cookies_file) if args.cookies_file else COOKIES_PATH
+    identity = _auth.verify_from_cookie_file(
+        cookies_path, expect_handle=args.expect_handle
+    )
+    print_identity_banner(identity)
+    if identity.status == "verified":
+        return 0
+    if identity.status == "partial":
+        return 1
+    return 2
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="xtool",
@@ -731,6 +755,28 @@ def build_parser() -> argparse.ArgumentParser:
     # login
     sp = sub.add_parser("login", help="store X cookies in ~/.xtool/cookies.json")
     sp.set_defaults(func=cmd_login)
+
+    # whoami / account
+    for name, helptext in (
+        ("whoami", "show the account xtool thinks you're logged in as"),
+        ("account", "alias for `xtool whoami`"),
+    ):
+        sp = sub.add_parser(name, help=helptext)
+        sp.add_argument(
+            "--cookies-file",
+            help=f"override default {COOKIES_PATH}",
+        )
+        sp.add_argument(
+            "--expect-handle",
+            metavar="HANDLE",
+            help=(
+                "your X @handle; when X's REST identity endpoints are "
+                "down we can still verify the cookies by resolving this "
+                "handle via GraphQL and matching it against the twid "
+                "cookie user_id"
+            ),
+        )
+        sp.set_defaults(func=cmd_whoami)
 
     # resolve-retweets
     sp = sub.add_parser(
