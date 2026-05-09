@@ -181,12 +181,17 @@ def ask_choice(
     *,
     valid: list[str] | None = None,
     default: str | None = None,
+    hide_default: bool = False,
 ) -> str:
     """Prompt user for a menu choice. Returns stripped lowercase input.
 
     If ``valid`` is provided, re-prompts until a valid choice is given.
+    When ``hide_default`` is set, the ``[default]`` suffix is NOT shown
+    even though blank input still maps to ``default``. Use this when
+    the default exists for convenience but printing ``[0]`` would be
+    confusing to the user (e.g. the main menu, where "0" means Exit).
     """
-    suffix = f" [{default}]" if default else ""
+    suffix = "" if hide_default or not default else f" [{default}]"
     while True:
         try:
             raw = input(f"  {prompt}{suffix}: ").strip()
@@ -227,6 +232,52 @@ def ask_confirm(prompt: str, *, default: bool = False) -> bool:
     if not raw:
         return default
     return raw in ("y", "yes")
+
+
+def ask_secret(
+    label: str,
+    *,
+    min_length: int = 10,
+) -> tuple[str, Optional[str]]:
+    """Ask for a secret value (cookie, token) with an explicit hidden-input UX.
+
+    The prompt makes it clear that input is intentionally hidden (a
+    recurring Termux confusion: users see nothing as they paste and
+    think the paste didn't land). After reading, we *never* echo the
+    value back; we print a short safe confirmation like::
+
+        auth_token captured: 40 chars
+
+    Returns ``(value, error)``. On success ``error`` is None and the
+    caller can continue. On failure ``value`` is empty and ``error``
+    carries a short, user-facing explanation suitable for printing
+    as-is ("empty", "only whitespace", "too short"). Callers are
+    expected to refuse to proceed whenever ``error`` is non-None.
+
+    ``min_length`` is a defence-in-depth check: X's real auth_token is
+    40 hex chars and ct0 is 32-160 chars, so anything under 10 is a
+    typo, not a valid cookie.
+    """
+    import getpass
+
+    try:
+        raw = getpass.getpass(f"  {label} (hidden, paste then press Enter): ")
+    except (EOFError, KeyboardInterrupt):
+        console.print("\n[yellow]cancelled[/yellow]")
+        return "", "cancelled"
+
+    # Distinguish the three failure modes so error messages are useful.
+    if raw == "":
+        return "", "empty"
+    if not raw.strip():
+        return "", "only whitespace"
+    value = raw.strip()
+    if len(value) < min_length:
+        return "", f"too short ({len(value)} chars; expected at least {min_length})"
+
+    # Safe confirmation -- character count only, never the value.
+    console.print(f"  [green]{label} captured:[/green] {len(value)} chars")
+    return value, None
 
 
 # ── Status output ─────────────────────────────────────────────────────────
