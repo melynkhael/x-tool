@@ -28,6 +28,8 @@ from . import __version__
 from .ui import (
     console,
     print_banner,
+    print_identity_banner,
+    print_identity_status,
     print_menu,
     ask_choice,
     ask_input,
@@ -44,6 +46,7 @@ from .ui import (
 )
 from .safety import check_cookies_exist, check_archive_path, confirm_typed
 from .logs import log_path_for, ensure_logs_dir
+from . import auth
 
 
 # ── State ─────────────────────────────────────────────────────────────────
@@ -56,7 +59,29 @@ _state: dict = {
     "likes_file": None,
     "archive_path": None,
     "handle": None,
+    "identity": None,  # xtool.auth.Identity | None
 }
+
+
+def _refresh_identity(*, force: bool = False) -> "auth.Identity | None":
+    """Load cookies and probe the identity, caching the result in
+    ``_state['identity']`` so the menu header can be redrawn every tick
+    without hitting x.com on every keystroke.
+
+    When no cookies exist the cached Identity is a ``status="none"``
+    value, not ``None``, so the header always has something to render.
+    """
+    cached = _state.get("identity")
+    if cached is not None and not force:
+        return cached
+    identity = auth.verify_from_cookie_file(
+        COOKIES_PATH,
+        expect_handle=_state.get("handle"),
+    )
+    _state["identity"] = identity
+    if identity.handle and not _state.get("handle"):
+        _state["handle"] = identity.handle
+    return identity
 
 
 # ── Main menu ─────────────────────────────────────────────────────────────
@@ -80,7 +105,14 @@ def run_menu() -> int:
     """Main interactive menu loop. Returns exit code."""
     print_banner()
 
+    # Prime the identity cache on entry -- cheap when cookies are absent,
+    # and having something to show in the header on the first iteration
+    # is a big UX win.
+    _refresh_identity(force=True)
+
     while True:
+        print_identity_status(_state.get("identity"))
+        console.print()
         print_menu(MENU_ITEMS, title="What would you like to do?")
         choice = ask_choice(
             "Choose",
@@ -147,7 +179,7 @@ def _menu_login() -> None:
         error("ct0 is required.")
         return
 
-    from .actions import Credentials, build_session, whoami, ActionError
+    from .actions import Credentials
 
     try:
         creds = Credentials(auth_token=auth_token, ct0=ct0)
@@ -159,22 +191,24 @@ def _menu_login() -> None:
         warnings.simplefilter("always")
         creds.to_file(COOKIES_PATH)
 
-    success(f"Cookies saved to {COOKIES_PATH}")
+    # Optional handle hint lets us upgrade "partial" to "verified" via
+    # the handle-match fallback when the REST endpoints are dead.
+    expect = ask_input(
+        "Your X @handle (optional, helps verify identity)",
+        default=_state.get("handle") or "",
+    )
+    expect_clean = expect.lstrip("@").strip() or None
+    if expect_clean:
+        _state["handle"] = expect_clean
 
-    # Verify
     info("Verifying session with X...")
-    session = build_session(creds)
-    try:
-        who = whoami(session)
-        _state["handle"] = who["screen_name"]
-        success(f"Logged in as @{who['screen_name']}")
-    except ActionError as exc:
-        warning("Cookies saved, but verification failed.")
-        warning(str(exc)[:200])
-        console.print(
-            "  [dim]You can still use most features. "
-            "Refresh cookies if operations fail.[/dim]"
-        )
+    identity = auth.verify_identity(creds, expect_handle=expect_clean)
+    _state["identity"] = identity
+    if identity.handle:
+        _state["handle"] = identity.handle
+
+    console.print()
+    print_identity_banner(identity)
 
 
 # ── 2. Load archive ──────────────────────────────────────────────────────
@@ -314,6 +348,7 @@ def _menu_delete(tweet_type: str = "tweet") -> None:
         action_name=f"delete {labels[tweet_type]}",
         count=len(ids),
         account=_state.get("handle"),
+        verified=bool(_state.get("identity") and _state["identity"].verified),
     ):
         return
 
@@ -345,6 +380,11 @@ def _menu_unretweet() -> None:
         return
     handle = handle.lstrip("@")
     _state["handle"] = handle
+
+    # With a handle in hand, give identity verification another shot;
+    # the handle-match fallback can upgrade partial -> verified when
+    # REST endpoints are down.
+    _refresh_identity(force=True)
 
     from .actions import Credentials, build_session, ActionError
     from .resolver import resolve_screen_name, iter_live_retweets, ResolverError
@@ -401,6 +441,9 @@ def _menu_unretweet() -> None:
                 action_name="unretweet reposts",
                 count=len(retweets),
                 account=handle,
+                verified=bool(
+                    _state.get("identity") and _state["identity"].verified
+                ),
             ):
                 return
 
@@ -473,6 +516,7 @@ def _menu_unlike() -> None:
         action_name="unlike tweets",
         count=len(ids),
         account=_state.get("handle"),
+        verified=bool(_state.get("identity") and _state["identity"].verified),
     ):
         return
 
