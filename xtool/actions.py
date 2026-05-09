@@ -406,6 +406,9 @@ def perform_action(
             body["already_gone"] = True
             return body
         raise ActionError(msg)
+    # Preserve the raw response for callers that want to inspect it
+    # (e.g. to verify the mutation actually took effect).
+    body["_raw_response"] = True
     return body
 
 
@@ -517,7 +520,10 @@ def bulk_action(
                 "ts": time.time(),
             }
             if detail:
-                rec["error"] = detail
+                if outcome in (action.past_tense, action.gone_tense, "dry-run"):
+                    rec["response"] = detail
+                else:
+                    rec["error"] = detail
             log_fh.write(json.dumps(rec) + "\n")
             log_fh.flush()
 
@@ -562,7 +568,14 @@ def _attempt(
         try:
             body = perform_action(session, action, tid, query_id=qid)
             outcome = action.gone_tense if body.get("already_gone") else action.past_tense
-            return outcome, None
+            # Include a truncated response body in 'detail' for successful
+            # calls too, so users can verify the mutation actually worked.
+            resp_summary = None
+            if body.get("_raw_response"):
+                # Strip the internal marker and produce a compact summary.
+                body.pop("_raw_response", None)
+                resp_summary = json.dumps(body, ensure_ascii=False)[:500]
+            return outcome, resp_summary
         except RateLimited as rl:
             last_error = f"rate limited (reset={rl.reset_epoch:.0f})"
             if rl.reset_epoch:
