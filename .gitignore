@@ -1,3 +1,4 @@
+# Python build / env
 __pycache__/
 *.py[cod]
 *.egg-info/
@@ -6,7 +7,29 @@ dist/
 .venv/
 venv/
 .env
+
+# xtool private user state. Never commit any of these. They live in
+# ~/.xtool/ for real installs but beginners sometimes run xtool from
+# inside the repo directory, which would otherwise stage the files.
+.xtool/
+cookies.json
+identity.json
+query_ids.json
+
+# Local operation logs. These can contain tweet ids / action outcomes
+# and are user-private even after the v0.2.5 redaction pass.
 deleted.jsonl
+unretweeted.jsonl
+unliked.jsonl
+live-retweets.jsonl
+filtered.jsonl
+tweets.jsonl
+likes.jsonl
 *.jsonl
 !examples/*.jsonl
-~/.xtool/
+
+# Debug dumps and error files written by xtool, pip, the installer.
+*.debug.jsonl
+*.err
+.tmp/
+xtool-install.err

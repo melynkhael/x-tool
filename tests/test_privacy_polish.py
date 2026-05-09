@@ -601,9 +601,9 @@ class TestDestructiveStillWarnsOnStaleIdentity:
 # ---------------------------------------------------------------------------
 
 class TestVersionBumpTo024:
-    def test_version_is_024(self):
+    def test_version_is_025(self):
         from xtool import __version__
-        assert __version__ == "0.2.4"
+        assert __version__ == "0.2.5"
 
     def test_changelog_has_024_section(self):
         changelog = (
@@ -615,8 +615,8 @@ class TestVersionBumpTo024:
         assert "user id" in lc or "user_id" in lc
         assert "show-user-id" in lc or "show_user_id" in lc
 
-    def test_readme_banner_example_is_024(self):
+    def test_readme_banner_example_is_025(self):
         readme = (
             Path(__file__).resolve().parent.parent / "README.md"
         ).read_text(encoding="utf-8")
-        assert "v0.2.4" in readme
+        assert "v0.2.5" in readme

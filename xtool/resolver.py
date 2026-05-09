@@ -58,6 +58,8 @@ from typing import Any, Callable, Iterator
 import requests
 
 from .actions import ActionError, WEB_BEARER
+from ._redact import redact_record
+from ._safe_io import chmod_private_file, safe_open_append
 from .discovery import get_query_id
 
 
@@ -503,7 +505,31 @@ def iter_live_retweets(
     seen_source: set[str] = set()
     debug_fh = None
     if debug_path is not None:
-        debug_fh = Path(debug_path).open("w", encoding="utf-8")
+        # Debug dumps carry raw timeline instructions: tweet text,
+        # entry metadata, possibly numeric user_ids for reposted
+        # authors. We open with safe_open_append so the file is
+        # created with mode 0600 and O_NOFOLLOW, then truncate so
+        # each --debug run starts clean. This replaces the v0.2.4
+        # Path.open("w") path which wrote under the process umask
+        # (typically 0o644) and silently followed symlinks.
+        #
+        # The "warn users before sharing" part of the security spec
+        # is handled in the CLI layer -- see xtool/cli.py where it
+        # prints a visible notice any time a debug dump is requested.
+        dpath = Path(debug_path)
+        # Remove any existing file so the "w" semantic ("start fresh")
+        # is preserved. Missing is fine, we create below.
+        try:
+            if dpath.exists() or dpath.is_symlink():
+                dpath.unlink()
+        except OSError:
+            pass
+        debug_fh = safe_open_append(
+            dpath, ensure_parent_private=False
+        )
+        # Make absolutely sure the final file is 0600 even if the
+        # platform ignored the mode argument to os.open above.
+        chmod_private_file(dpath)
 
     try:
         while stats.entries_seen < max_tweets:
@@ -568,20 +594,25 @@ def iter_live_retweets(
             new_cursor = _find_bottom_cursor(instructions)
 
             # Dump the page when we saw entries but found no retweets,
-            # to help diagnose schema drift.
+            # to help diagnose schema drift. Run the whole record
+            # through redact_record first so numeric user_ids and any
+            # stray cookie/authorization fragments embedded in the
+            # timeline instructions are scrubbed before reaching disk.
+            # Debug dumps are 0600 and carry a warning header, but
+            # users still paste them into bug reports -- double-layer
+            # defence matters.
             if debug_fh is not None and page_entries > 0 and page_retweets == 0:
+                safe_payload = redact_record(
+                    {
+                        "page": stats.pages_fetched,
+                        "cursor_in": cursor,
+                        "cursor_out": new_cursor,
+                        "entries_on_page": page_entries,
+                        "instructions": instructions,
+                    }
+                )
                 debug_fh.write(
-                    json.dumps(
-                        {
-                            "page": stats.pages_fetched,
-                            "cursor_in": cursor,
-                            "cursor_out": new_cursor,
-                            "entries_on_page": page_entries,
-                            "instructions": instructions,
-                        },
-                        ensure_ascii=False,
-                    )
-                    + "\n"
+                    json.dumps(safe_payload, ensure_ascii=False) + "\n"
                 )
                 debug_fh.flush()
 

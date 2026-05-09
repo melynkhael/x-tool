@@ -107,7 +107,7 @@ xtool
 You'll see something like this:
 
 ```
- X-Tool — X / Twitter Account Cleanup  v0.2.4
+ X-Tool — X / Twitter Account Cleanup  v0.2.5
   by: melynkhael
 
   Account: not logged in

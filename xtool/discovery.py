@@ -140,8 +140,17 @@ def _load_cache() -> dict | None:
 
 
 def _save_cache(payload: dict) -> None:
-    CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    CACHE_PATH.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    """Persist the query-id cache with mode 0600 under a 0700 parent.
+
+    The cache itself is not a credential -- these are public query ids
+    from x.com's JS bundle -- but ``~/.xtool/query_ids.json`` lives
+    next to ``cookies.json`` and we apply the same directory chmod to
+    the whole tree. Using :func:`xtool._safe_io.safe_write_json` keeps
+    every file under ``~/.xtool`` on the same "atomic, private, no
+    symlink follow" path.
+    """
+    from ._safe_io import safe_write_json
+    safe_write_json(CACHE_PATH, payload)
 
 
 def discover_query_ids(

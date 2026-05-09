@@ -2,6 +2,89 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.5] - 2026-05-09
+
+### Security / privacy audit
+
+This release is a small, targeted security/privacy pass on top of
+v0.2.4. The user-visible menu UX is unchanged: `Account: @handle`
+still does not surface the numeric user ID, `xtool whoami --show-user-id`
+is still the opt-in, `xtool update` still works, and destructive
+actions still require the typed `yes` confirmation and dry-run flow.
+
+#### Fixed
+
+- **Cookie file permission race.** `Credentials.to_file()` previously
+  called `Path.write_text` (which honours the process umask -- often
+  `0o644`) and then followed up with `chmod 0o600`. Between the two
+  steps a local attacker could open the file and read the cookie.
+  The new write path uses `mkstemp` + `fsync` + atomic `os.replace`
+  and opens the tempfile with `mode=0o600` from the first byte, so
+  the file is never world-readable.
+- **`~/.xtool/` directory mode.** The directory used to be created
+  with whatever `mkdir` produced under the user umask (typically
+  `0o755`). It is now created and re-tightened to `0o700` every
+  time xtool touches it. This is not a credential leak on its own,
+  but it did betray which accounts were actively being cleaned up.
+- **Sensitive file modes.** `cookies.json`, `identity.json`,
+  `query_ids.json`, per-operation log files, and resolver `--debug`
+  dumps are now chmodded to `0o600` at creation time via the shared
+  `xtool._safe_io` helpers, and re-clamped to `0o600` whenever
+  `xtool doctor` or the log lister touches them.
+- **Symlink / path traversal.** All writes to sensitive paths now
+  use `O_NOFOLLOW` on the tempfile create and rename-based atomic
+  replace at the destination. An attacker-placed symlink at
+  `~/.xtool/cookies.json` (or any log file) no longer redirects the
+  write to another target.
+- **Log redaction.** `bulk_action` used to record truncated GraphQL
+  response bodies and raw error messages. Both now pass through
+  `xtool._redact.redact_record` before serialization, which replaces
+  `auth_token` / `ct0` / `twid` / `Cookie:` / `authorization:` /
+  `Bearer …` values with placeholder tokens and scrubs
+  `user_id` / `rest_id` fields from response snippets.
+- **`whoami` error hint.** The error message emitted when all REST
+  identity endpoints fail used to interpolate the raw numeric
+  `user_id` from the `twid` cookie into the hint text. The hint now
+  only tells the user whether a twid cookie was present; the numeric
+  value is redacted.
+- **Resolver debug dumps.** `xtool resolve-retweets --debug` writes
+  raw timeline instructions for diagnosis. Those dumps are now
+  `0o600`, the payload is piped through `redact_record` before
+  write, and the CLI prints a visible notice telling users the file
+  is private before the walk begins.
+
+#### Added
+
+- **`xtool doctor` command.** Local, read-only security self-check.
+  Reports on `~/.xtool` permissions, per-file modes, symlink
+  tampering, credential-shaped content in `identity.json`, probable
+  leaks in common shell history files, and sensitive filenames
+  tracked in the current git checkout. Never prints secret values.
+  `xtool doctor --fix` clamps obvious permission issues; it does not
+  move, rename, or delete files. Exit code `0` / `1` is driven by
+  whether any critical finding remains, so CI can wire it up.
+- **Shell-history leak warning.** Running `xtool delete`,
+  `xtool unretweet`, `xtool unlike`, or `xtool resolve-retweets`
+  with `--auth-token` / `--ct0` on the command line now prints a
+  yellow warning explaining that shell history and `ps` listings
+  retain the value, and recommending `xtool login` instead.
+- **Debug dump share warning.** When `--debug` is passed to
+  `xtool resolve-retweets` the tool prints the dump path, its
+  `chmod 600` mode, and a reminder to review before sharing.
+- **`xtool/_safe_io.py`** -- private I/O primitives reused by every
+  callsite that writes under `~/.xtool/`.
+- **`xtool/_redact.py`** -- redaction helpers reused by logs,
+  debug dumps, and the `whoami` error path.
+
+#### Changed
+
+- Expanded `.gitignore` to cover `cookies.json`, `identity.json`,
+  `query_ids.json`, `*.debug.jsonl`, `*.err`, `.tmp/`, and
+  per-action log filenames, so users who keep xtool state inside
+  the repo directory cannot accidentally stage a credential file.
+- Version bumped to v0.2.5 in `__init__.py`, `pyproject.toml`,
+  `README.md`, and the CHANGELOG.
+
 ## [0.2.4] - 2026-05-09
 
 ### Fixed (privacy / UX)
