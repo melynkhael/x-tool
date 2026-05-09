@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 ## [0.2.2] - 2026-05-09
 
+### Fixed
+- `bash install.sh --quiet` no longer writes to the hardcoded
+  `/tmp/xtool-install.err`. That path does not exist on Termux, so
+  the script produced noisy `No such file or directory` warnings
+  even on successful installs. The script now picks a temp dir by
+  consulting `$TMPDIR`, then `$PREFIX/tmp` (Termux-native), then a
+  repo-local `.tmp/`, and creates a unique file with `mktemp`. On
+  success the temp file is removed; on failure it is preserved and
+  its path is printed.
+
 ### Added
 - `xtool update` command: beginner-friendly self-update. Runs a quiet
   `git pull --ff-only --quiet origin main` followed by a quiet

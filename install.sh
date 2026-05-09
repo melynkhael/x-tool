@@ -6,6 +6,8 @@
 #     pip` is forbidden and makes the package database inconsistent.
 #   * On Termux we also need `libexpat`, `openssl` and `rust` to build
 #     some transitive deps of `requests` / `rich` from source.
+#   * /tmp does not exist on Termux. Never hardcode it; use the
+#     _tmp_dir helper below.
 #
 # Flags:
 #   --quiet   Beginner-friendly output: three short progress lines
@@ -41,6 +43,49 @@ note() {
 
 here="$(cd "$(dirname "$0")" && pwd)"
 cd "$here"
+
+# ---------------------------------------------------------------------------
+# Pick a writable temp directory. We do NOT hardcode /tmp because Termux
+# does not have it (the shared /tmp is only writable for root on
+# Android). Preference order:
+#   1. $TMPDIR               -- the POSIX-standard hint; Termux sets it.
+#   2. $PREFIX/tmp           -- the Termux-native fallback.
+#   3. $here/.tmp            -- last-ditch, always in the repo checkout.
+#
+# Each candidate is validated with ``mkdir -p`` + writability check so
+# that a stale env var (e.g. TMPDIR pointing at a deleted path) still
+# falls through cleanly instead of crashing the install.
+# ---------------------------------------------------------------------------
+_tmp_dir() {
+    local cand
+    for cand in "${TMPDIR:-}" "${PREFIX:+$PREFIX/tmp}" "$here/.tmp"; do
+        [ -z "$cand" ] && continue
+        if mkdir -p "$cand" 2>/dev/null && [ -w "$cand" ]; then
+            printf '%s\n' "$cand"
+            return 0
+        fi
+    done
+    # If nothing worked, fall back to the repo dir itself; it's
+    # guaranteed to be writable because we just cd'd into it.
+    printf '%s\n' "$here"
+}
+
+_make_err_file() {
+    # Create a unique temp file for stderr capture. Uses mktemp when
+    # available (Termux + Linux + macOS); otherwise constructs a
+    # predictable path so ancient busybox shells still work.
+    local dir
+    dir="$(_tmp_dir)"
+    local path
+    if command -v mktemp >/dev/null 2>&1; then
+        path="$(mktemp "$dir/xtool-install.XXXXXX.err" 2>/dev/null || true)"
+    fi
+    if [ -z "${path:-}" ]; then
+        path="$dir/xtool-install-$$-$(date +%s 2>/dev/null || echo 0).err"
+        : > "$path" || { echo "ERROR: cannot create temp file in $dir" >&2; exit 1; }
+    fi
+    printf '%s\n' "$path"
+}
 
 is_termux() { command -v pkg >/dev/null 2>&1 && [ -n "${PREFIX:-}" ] && [[ "$PREFIX" == *"/com.termux/"* ]]; }
 
@@ -89,24 +134,43 @@ PY="$(command -v python3 || command -v python)"
 if [ "$quiet" -eq 1 ]; then
     say "Installing X-Tool..."
     # -q keeps pip quiet on success but still prints real errors to
-    # stderr. If the quiet call fails, we rerun verbosely so the user
-    # sees exactly what went wrong -- real errors are never hidden.
-    if ! "$PY" -m pip install --upgrade --disable-pip-version-check -q . 2>/tmp/xtool-install.err; then
-        cat /tmp/xtool-install.err >&2 || true
-        # Fallback path for Termux where pip may be exposed only as a
-        # standalone binary.
-        if command -v pip >/dev/null 2>&1; then
-            pip install --upgrade --disable-pip-version-check -q . || {
-                say "Install failed. Rerunning verbosely to show the full error:"
-                "$PY" -m pip install --upgrade --disable-pip-version-check .
-                exit 1
-            }
-        else
-            say "Install failed. Rerunning verbosely to show the full error:"
-            "$PY" -m pip install --upgrade --disable-pip-version-check .
-            exit 1
+    # stderr. We capture that stderr to a temp file so we can replay
+    # it if the install fails. On success we delete the file; on
+    # failure we print it and exit non-zero so beginners see the real
+    # error. Using _make_err_file avoids the old /tmp hardcode that
+    # broke on Termux where /tmp does not exist.
+    err_file="$(_make_err_file)"
+    install_ok=0
+    if "$PY" -m pip install --upgrade --disable-pip-version-check -q . 2>"$err_file"; then
+        install_ok=1
+    elif command -v pip >/dev/null 2>&1; then
+        # Fallback path for Termux builds that expose pip only as a
+        # standalone binary (no `python -m pip`). Capture its stderr
+        # to the same file so failures from either attempt are
+        # surfaced together.
+        if pip install --upgrade --disable-pip-version-check -q . 2>>"$err_file"; then
+            install_ok=1
         fi
     fi
+
+    if [ "$install_ok" -ne 1 ]; then
+        say "Install failed. Captured error output:"
+        if [ -s "$err_file" ]; then
+            cat "$err_file" >&2
+        else
+            say "  (pip produced no error output; rerunning verbosely for diagnosis)"
+            # Keep the err_file around for the user to inspect even
+            # after the verbose rerun writes to the terminal.
+            "$PY" -m pip install --upgrade --disable-pip-version-check . || true
+        fi
+        say ""
+        say "Error log: $err_file"
+        exit 1
+    fi
+
+    # Success path: clean up the (empty) error file.
+    rm -f "$err_file"
+
     say "Done."
     # Show the installed version so users know they are on the new build.
     if "$PY" -m pip show xtool >/dev/null 2>&1; then
