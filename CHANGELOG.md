@@ -2,6 +2,33 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.3] - 2026-05-09
+
+### Fixed
+- `xtool update` no longer incorrectly reports "not installed from a
+  git checkout" for a working editable checkout. The updater used to
+  walk up from its own package directory only; when the package had
+  been installed non-editably (which `install.sh --quiet` did on
+  v0.2.2), `xtool/` lived in `site-packages` with no `.git`
+  ancestor, so the walk found nothing. The updater now exposes a
+  spec-named `find_git_root()` helper, runs it from both the
+  package file **and** the current working directory, and prefers
+  the package-location result when both succeed. The cwd fallback
+  is guarded by a sanity check (``xtool/__init__.py`` must be
+  present at the candidate root) so `xtool update` never tries to
+  update an unrelated repo the user happens to be standing in.
+- `install.sh` now installs editable (`pip install -e .`) in both
+  quiet and verbose modes. This keeps the installed package rooted
+  in the local git checkout, which is what the editable-aware
+  detection in `xtool update` depends on. Users who installed with
+  v0.2.2's quiet path should re-run `bash install.sh --quiet` once
+  to switch over; after that `xtool update` will work for future
+  releases.
+- When the updater truly cannot find a git checkout, the error
+  message now tells the user how to set one up
+  (`git clone … && bash install.sh --quiet`) rather than pointing
+  them at a pip URL that would reproduce the same problem.
+
 ## [0.2.2] - 2026-05-09
 
 ### Fixed
