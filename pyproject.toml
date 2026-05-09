@@ -4,18 +4,24 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "xtool"
-version = "0.1.0"
-description = "Bulk-delete tweets from an X (Twitter) archive on Termux/Linux."
+version = "0.2.0"
+description = "Clean up your X (Twitter) account — delete tweets, undo retweets, remove likes."
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
 authors = [{ name = "x-tool contributors" }]
-keywords = ["twitter", "x", "delete", "archive", "termux", "cli"]
+keywords = ["twitter", "x", "delete", "archive", "termux", "cli", "cleanup", "bulk"]
 classifiers = [
     "Environment :: Console",
     "License :: OSI Approved :: MIT License",
     "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Utilities",
 ]
 dependencies = [
@@ -33,3 +39,10 @@ Issues = "https://github.com/melynkhael/x-tool/issues"
 
 [tool.setuptools.packages.find]
 include = ["xtool*"]
+
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

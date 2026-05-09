@@ -671,13 +671,25 @@ def _add_bulk_flags(sp: argparse.ArgumentParser, default_log: str) -> None:
     )
 
 
+def cmd_menu(args: argparse.Namespace) -> int:
+    """Launch interactive menu."""
+    from .wizard import run_menu
+    return run_menu()
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="xtool",
         description="Bulk-delete tweets, undo retweets and unlike from your X archive.",
     )
     p.add_argument("--version", action="version", version=f"xtool {__version__}")
-    sub = p.add_subparsers(dest="command", required=True)
+    sub = p.add_subparsers(dest="command")
+
+    # menu / wizard (interactive mode)
+    sp = sub.add_parser("menu", help="interactive guided menu (default)")
+    sp.set_defaults(func=cmd_menu)
+    sp = sub.add_parser("wizard", help="interactive guided menu (alias)")
+    sp.set_defaults(func=cmd_menu)
 
     # parse
     sp = sub.add_parser("parse", help="convert tweets.js / like.js archive to JSONL")
@@ -818,6 +830,16 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    # No subcommand given -> launch interactive menu
+    if args.command is None:
+        from .wizard import run_menu
+        try:
+            return run_menu()
+        except KeyboardInterrupt:
+            console.print("\n[yellow]interrupted[/yellow]")
+            return 130
+
     try:
         return args.func(args)
     except KeyboardInterrupt:
