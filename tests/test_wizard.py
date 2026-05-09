@@ -369,10 +369,12 @@ class TestVerifyIdentity:
         assert ident.status == "partial"
         assert ident.handle is None
         assert ident.user_id == "777"
-        assert ident.source == "cookie"
+        # Partial-via-twid is now reported as source "twid" (was
+        # "cookie" before we distinguished the two partial cases).
+        assert ident.source == "twid"
         assert ident.has_cookies is True
         assert ident.verified is False
-        assert "REST 404" in ident.detail or "could not" in ident.detail
+        assert "user_id 777" in ident.detail or "twid" in ident.detail.lower()
 
     def test_rest_fail_no_twid_returns_none(self, monkeypatch):
         from xtool import auth as _auth
@@ -445,7 +447,11 @@ class TestVerifyIdentity:
         ident = _auth.verify_identity(self._creds(), expect_handle="someone_else")
         assert ident.status == "partial"
         assert ident.handle is None
-        assert ident.source == "cookie"
+        # When a handle was supplied but its GraphQL lookup didn't
+        # match the twid user_id, we stay at partial with source
+        # "twid" -- we still have the twid signal, we just couldn't
+        # prove the handle.
+        assert ident.source == "twid"
 
 
 class TestVerifyFromCookieFile:
@@ -499,9 +505,11 @@ class TestIdentityOneLiner:
 
     def test_partial_with_user_id_only(self):
         from xtool.auth import Identity
+        # twid-only partial now explicitly surfaces the user_id in
+        # the one-liner so the menu header is informative.
         line = Identity(status="partial", user_id="123").one_liner()
         assert "123" in line
-        assert "not verified" in line
+        assert "twid" in line
 
     def test_partial_bare(self):
         from xtool.auth import Identity
@@ -777,10 +785,12 @@ class TestMenuLoginValidation:
         saved = {"path": None, "creds": None}
 
         class FakeCreds:
-            def __init__(self, auth_token, ct0):
+            def __init__(self, auth_token, ct0, twid=None):
                 self.auth_token = auth_token
                 self.ct0 = ct0
+                self.twid = twid
                 saved["creds"] = (auth_token, ct0)
+                saved["twid"] = twid
             def to_file(self, path):
                 saved["path"] = str(path)
                 return True
@@ -853,12 +863,14 @@ class TestMenuLoginValidation:
         saved = self._run_login(
             monkeypatch,
             {
-                "getpass": ["a" * 40, "b" * 40],
+                # auth_token, ct0, twid (blank=skip)
+                "getpass": ["a" * 40, "b" * 40, ""],
                 # ask_input("X handle without @ (optional)"): blank
                 "input": [""],
             },
         )
         assert saved["creds"] == ("a" * 40, "b" * 40)
+        assert saved.get("twid") is None
         assert saved["path"] and saved["path"].endswith("cookies.json")
 
 
@@ -931,7 +943,10 @@ class TestSavedButUnverifiedIdentity:
         print_identity_banner(Identity(status="partial"))
         out = capsys.readouterr().out
         assert "Not logged in" not in out
-        assert "Cookies were saved" in out
+        # Spec wording: "Cookies saved, but X identity verification
+        # failed." Be flexible about the first word so a future polish
+        # to "Saved" or similar doesn't break the test.
+        assert "Cookies saved" in out
         assert "identity verification failed" in out
 
 
@@ -992,7 +1007,8 @@ class TestHandlePromptIsShort:
         so narrow terminals render it on one line."""
         from xtool import wizard, auth as _auth
 
-        getpass_queue = ["a" * 40, "b" * 40]
+        # auth_token, ct0, twid (blank=skip)
+        getpass_queue = ["a" * 40, "b" * 40, ""]
         input_prompts = []
 
         def fake_input(p=""):
@@ -1004,7 +1020,7 @@ class TestHandlePromptIsShort:
 
         # Skip any side-effects beyond constructing credentials.
         class FakeCreds:
-            def __init__(self, auth_token, ct0):
+            def __init__(self, auth_token, ct0, twid=None):
                 pass
             def to_file(self, path):
                 return True
@@ -1032,3 +1048,366 @@ class TestHandlePromptIsShort:
             f"handle prompt too long ({len(handle_prompt)} chars): "
             f"{handle_prompt!r}"
         )
+
+
+
+# =============================================================================
+# v0.2.1 additions: robust identity verification
+# =============================================================================
+#
+# Covers the spec:
+#   * parse_twid_user_id() accepts every form X (or a clumsy paste) can
+#     produce, and rejects garbage.
+#   * normalize_handle() strips @ and lowercases.
+#   * verify_identity() falls back through twid -> GraphQL without ever
+#     depending solely on REST.
+#   * xtool whoami --expect-handle uses the GraphQL fallback path.
+#   * The menu banner now carries the "by: melynkhael" attribution and
+#     the menu account header shows the correct state for each case.
+#   * Destructive actions never silently proceed when identity is
+#     unverified.
+
+
+class TestParseTwidUserId:
+    """Every shape X or a careless paste can produce must parse cleanly."""
+
+    def test_unescaped_u_equals(self):
+        from xtool.auth import parse_twid_user_id
+        assert parse_twid_user_id("u=1234567890") == "1234567890"
+
+    def test_url_encoded_u_equals(self):
+        from xtool.auth import parse_twid_user_id
+        assert parse_twid_user_id("u%3D1234567890") == "1234567890"
+
+    def test_double_quoted(self):
+        from xtool.auth import parse_twid_user_id
+        assert parse_twid_user_id('"u=1234567890"') == "1234567890"
+
+    def test_single_quoted(self):
+        from xtool.auth import parse_twid_user_id
+        assert parse_twid_user_id("'u=42'") == "42"
+
+    def test_bare_numeric(self):
+        from xtool.auth import parse_twid_user_id
+        assert parse_twid_user_id("1234567890") == "1234567890"
+
+    def test_mixed_cookie_header(self):
+        """Accept a full 'cookie' header-style paste, e.g. when the user
+        copied more than just the twid cell."""
+        from xtool.auth import parse_twid_user_id
+        val = "kdt=xxxx; u=555555; sess=zzz"
+        assert parse_twid_user_id(val) == "555555"
+
+    def test_empty_returns_none(self):
+        from xtool.auth import parse_twid_user_id
+        assert parse_twid_user_id("") is None
+        assert parse_twid_user_id(None) is None
+        assert parse_twid_user_id("   ") is None
+
+    def test_garbage_rejected(self):
+        from xtool.auth import parse_twid_user_id
+        assert parse_twid_user_id("abcdef") is None
+        assert parse_twid_user_id("u=") is None
+        assert parse_twid_user_id("not-a-real-value") is None
+
+    def test_strips_whitespace(self):
+        from xtool.auth import parse_twid_user_id
+        assert parse_twid_user_id("  u=7  ") == "7"
+
+
+class TestNormalizeHandle:
+    """normalize_handle() strips @, trims, and lowercases."""
+
+    def test_strips_at(self):
+        from xtool.auth import normalize_handle
+        assert normalize_handle("@veldorakite") == "veldorakite"
+
+    def test_lowercases(self):
+        from xtool.auth import normalize_handle
+        assert normalize_handle("Veldorakite") == "veldorakite"
+        assert normalize_handle("VELDORAKITE") == "veldorakite"
+
+    def test_combined(self):
+        from xtool.auth import normalize_handle
+        assert normalize_handle("  @Veldorakite  ") == "veldorakite"
+
+    def test_empty_returns_none(self):
+        from xtool.auth import normalize_handle
+        assert normalize_handle("") is None
+        assert normalize_handle(None) is None
+        assert normalize_handle("@") is None
+
+
+class TestHandleMatchingCaseInsensitive:
+    """Handle-match must ignore the case of the expect_handle argument."""
+
+    def _creds(self):
+        from xtool.actions import Credentials
+        return Credentials("a" * 40, "b" * 40)
+
+    def test_uppercase_handle_matches(self, monkeypatch):
+        from xtool import auth as _auth
+        from xtool.actions import ActionError
+
+        def fake_build_session(creds):
+            return _FakeSession([_FakeCookie("twid", "u%3D12345")])
+
+        def fake_whoami(session, timeout=20.0):
+            raise ActionError("REST 404")
+
+        monkeypatch.setattr(_auth, "build_session", fake_build_session)
+        monkeypatch.setattr(_auth, "whoami", fake_whoami)
+
+        from xtool import resolver
+        seen: dict = {}
+
+        def fake_resolve(session, handle, offline=False):
+            seen["handle"] = handle
+            return "12345"
+
+        monkeypatch.setattr(resolver, "resolve_screen_name", fake_resolve)
+
+        ident = _auth.verify_identity(
+            self._creds(), expect_handle="@VELDORAKITE"
+        )
+        # The @ is stripped and the handle is lowercased before lookup.
+        assert seen["handle"] == "veldorakite"
+        assert ident.status == "verified"
+        assert ident.handle == "veldorakite"
+        assert ident.source == "handle-match"
+
+
+class TestAuthCookiesProduceUsefulPartial:
+    """Cookies present but REST dead must never look like 'not logged in'."""
+
+    def test_auth_plus_ct0_alone(self, monkeypatch):
+        from xtool import auth as _auth
+        from xtool.actions import ActionError, Credentials
+
+        def fake_build_session(creds):
+            return _FakeSession([
+                _FakeCookie("auth_token", creds.auth_token),
+                _FakeCookie("ct0", creds.ct0),
+            ])
+
+        def fake_whoami(session, timeout=20.0):
+            raise ActionError("REST dead")
+
+        monkeypatch.setattr(_auth, "build_session", fake_build_session)
+        monkeypatch.setattr(_auth, "whoami", fake_whoami)
+
+        ident = _auth.verify_identity(Credentials("a" * 40, "b" * 40))
+        assert ident.status == "partial"
+        assert ident.source == "cookie"
+        assert ident.has_cookies is True
+
+    def test_auth_plus_ct0_plus_twid(self, monkeypatch):
+        """auth_token + ct0 + twid with REST dead should surface the
+        user_id (source 'twid') rather than the weaker 'cookie' state."""
+        from xtool import auth as _auth
+        from xtool.actions import ActionError, Credentials
+
+        def fake_build_session(creds):
+            return _FakeSession([
+                _FakeCookie("auth_token", creds.auth_token),
+                _FakeCookie("ct0", creds.ct0),
+                _FakeCookie("twid", "u=7777"),
+            ])
+
+        def fake_whoami(session, timeout=20.0):
+            raise ActionError("REST dead")
+
+        monkeypatch.setattr(_auth, "build_session", fake_build_session)
+        monkeypatch.setattr(_auth, "whoami", fake_whoami)
+
+        ident = _auth.verify_identity(
+            Credentials("a" * 40, "b" * 40, twid="u=7777")
+        )
+        assert ident.status == "partial"
+        assert ident.source == "twid"
+        assert ident.user_id == "7777"
+        assert ident.has_cookies is True
+
+    def test_twid_plus_handle_graphql_match_is_verified(self, monkeypatch):
+        """twid + successful UserByScreenName match should be VERIFIED,
+        even when REST is completely dead -- that's the whole point of
+        the GraphQL fallback path."""
+        from xtool import auth as _auth
+        from xtool.actions import ActionError, Credentials
+
+        def fake_build_session(creds):
+            return _FakeSession([_FakeCookie("twid", "u%3D12345")])
+
+        def fake_whoami(session, timeout=20.0):
+            raise ActionError("REST 404")
+
+        monkeypatch.setattr(_auth, "build_session", fake_build_session)
+        monkeypatch.setattr(_auth, "whoami", fake_whoami)
+
+        from xtool import resolver
+        monkeypatch.setattr(
+            resolver,
+            "resolve_screen_name",
+            lambda sess, h, offline=False: "12345",
+        )
+
+        ident = _auth.verify_identity(
+            Credentials("a" * 40, "b" * 40, twid="u=12345"),
+            expect_handle="veldorakite",
+        )
+        assert ident.status == "verified"
+        assert ident.handle == "veldorakite"
+        assert ident.user_id == "12345"
+        assert ident.source == "handle-match"
+
+
+class TestWhoamiUsesGraphQLFallback:
+    """`xtool whoami --expect-handle X` must fall through to GraphQL
+    when REST 404s, rather than reporting 'identity not verified'."""
+
+    def test_cli_whoami_uses_graphql(self, monkeypatch, tmp_path):
+        from xtool import cli, auth as _auth
+        from xtool.actions import ActionError
+
+        cookies = tmp_path / "cookies.json"
+        cookies.write_text(json.dumps({
+            "auth_token": "a" * 40,
+            "ct0": "b" * 40,
+            "twid": "u=12345",
+        }))
+
+        # Stub the REST layer so it fails, then stub the resolver so
+        # the handle-match path succeeds. Never trigger a real request.
+        monkeypatch.setattr(
+            _auth, "whoami",
+            lambda session, timeout=20.0: (_ for _ in ()).throw(
+                ActionError("REST dead")
+            ),
+        )
+
+        calls = {"resolver": 0}
+
+        def fake_resolve(session, handle, offline=False):
+            calls["resolver"] += 1
+            assert handle == "veldorakite"  # normalized
+            return "12345"
+
+        from xtool import resolver as _resolver
+        monkeypatch.setattr(_resolver, "resolve_screen_name", fake_resolve)
+
+        rc = cli.main([
+            "whoami",
+            "--cookies-file", str(cookies),
+            "--expect-handle", "Veldorakite",
+        ])
+        assert rc == 0  # verified
+        assert calls["resolver"] == 1
+
+
+class TestMenuBannerHasAttribution:
+    """The Rich banner printed by run_menu() should include the
+    maintainer credit so forks / screenshots keep the attribution."""
+
+    def test_banner_contains_by_melynkhael(self, capsys):
+        from xtool.ui import print_banner
+        print_banner()
+        out = capsys.readouterr().out
+        assert "by: melynkhael" in out
+
+    def test_banner_contains_version(self, capsys):
+        from xtool import __version__
+        from xtool.ui import print_banner
+        print_banner()
+        out = capsys.readouterr().out
+        assert f"v{__version__}" in out
+
+
+class TestVersionBumpedToPatch:
+    def test_version_is_021(self):
+        from xtool import __version__
+        assert __version__ == "0.2.1"
+
+
+class TestMenuAccountHeaderStates:
+    """format_identity_line() must emit the spec's text for each state."""
+
+    def _rendered(self, identity):
+        from xtool.ui import format_identity_line
+        return format_identity_line(identity).plain
+
+    def test_none(self):
+        from xtool.auth import Identity
+        assert self._rendered(Identity(status="none")) == (
+            "Account: not logged in"
+        )
+
+    def test_cookies_only(self):
+        from xtool.auth import Identity
+        text = self._rendered(
+            Identity(status="partial", source="cookie")
+        )
+        assert text == "Account: cookies saved, identity not verified"
+
+    def test_twid_only(self):
+        from xtool.auth import Identity
+        text = self._rendered(
+            Identity(status="partial", user_id="7777", source="twid")
+        )
+        assert "7777" in text
+        assert "twid" in text
+        # Must not be the weaker "cookies saved, identity not verified"
+        # line -- we actually know the user_id here.
+        assert "cookies saved, identity not verified" not in text
+
+    def test_verified(self):
+        from xtool.auth import Identity
+        text = self._rendered(
+            Identity(status="verified", handle="veldorakite", source="rest")
+        )
+        assert text == "Account: @veldorakite verified"
+
+
+class TestDestructiveActionNeedsConfirmation:
+    """Destructive actions must never silently proceed when identity is
+    unverified -- the confirm_typed() branch that shows the
+    'account identity is NOT verified' block must still require a
+    typed 'yes'."""
+
+    def test_unverified_rejects_blank(self, monkeypatch, capsys):
+        from xtool import safety
+        # Blank input must NOT count as confirmation.
+        monkeypatch.setattr("builtins.input", lambda prompt="": "")
+        assert safety.confirm_typed(
+            action_name="delete",
+            count=100,
+            account="x",
+            verified=False,
+        ) is False
+
+    def test_unverified_rejects_y_shortcut(self, monkeypatch, capsys):
+        """Even the shorthand 'y' (which some confirmation prompts
+        accept) must be rejected -- for destructive actions we require
+        the literal 'yes'."""
+        from xtool import safety
+        monkeypatch.setattr("builtins.input", lambda prompt="": "y")
+        assert safety.confirm_typed(
+            action_name="delete",
+            count=100,
+            account="x",
+            verified=False,
+        ) is False
+
+    def test_unverified_prints_extra_warning(self, monkeypatch, capsys):
+        from xtool import safety
+        monkeypatch.setattr("builtins.input", lambda prompt="": "no")
+        safety.confirm_typed(
+            action_name="delete",
+            count=100,
+            account="x",
+            verified=False,
+        )
+        out = capsys.readouterr().out
+        # The unverified-branch warning text must be printed; this is
+        # what keeps the user from assuming the account is confirmed.
+        assert "identity is NOT verified" in out.replace("\n", " ") or \
+               "identity is not verified" in out.lower().replace("\n", " ")

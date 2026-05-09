@@ -1,41 +1,49 @@
 """Account identity verification for xtool.
 
-X has been quietly deprecating the 1.1 REST endpoints the web client
-used to call on page load (``/account/settings.json``,
+X has been quietly deprecating the legacy 1.1 REST endpoints the web
+client used to call on page load (``/account/settings.json``,
 ``/account/verify_credentials.json``). When those routes 404, xtool's
-older whoami logic looked like cookies were bad even though they were
-fine for every GraphQL mutation we actually run. This module fixes that
-by trying multiple signals in order and returning a structured result
-so the UI can show a real status instead of a stack trace.
+older whoami logic looked like cookies were bad even though the same
+cookies worked for every GraphQL mutation we actually run.
 
-Verification order
-------------------
-1. **REST whoami** (:func:`xtool.actions.whoami`) - the legacy path.
-   When x.com is healthy this is the only call we need and we come out
-   with a confirmed ``screen_name`` + ``user_id``.
+This module makes identity verification multi-signal and order-aware
+so ``xtool whoami`` gives users a useful, truthful status regardless
+of which X surface is up:
 
-2. **twid cookie** - once you're logged in, x.com sets a ``twid`` cookie
-   that encodes your numeric user_id (``u%3D<id>`` or ``u=<id>``). If it's
-   present, we have strong evidence the cookies are real, just not a
-   handle. We report a ``partial`` status -- enough to show the user_id
-   and proceed with caution -- instead of claiming the cookies are bad.
+1. **REST whoami** -- the fast happy path. When x.com's REST surface
+   is healthy we get both ``screen_name`` and ``user_id`` in one call
+   and we're done.
 
-3. **handle-match via GraphQL** - if the caller knows (or asked for) the
-   expected handle, we resolve it via ``UserByScreenName``. If that
-   ``rest_id`` matches the twid user_id, we upgrade the status back to
-   ``verified`` -- cookies are valid *and* they belong to the handle the
-   user claimed. This works even when the REST endpoints are all 404.
+2. **twid cookie** -- once logged in, x.com sets a ``twid`` cookie
+   that carries the numeric ``user_id``. xtool can also accept the
+   value directly during ``xtool login`` (the third optional prompt)
+   and inject it into the session jar before verification. This gives
+   us a strong "you are definitely logged in, and here's which
+   account" signal without depending on REST at all.
+
+3. **GraphQL handle-match** -- when the caller knows the expected
+   handle (either via ``--expect-handle`` or the wizard login prompt),
+   we resolve it via ``UserByScreenName`` and compare the returned
+   ``rest_id`` to the twid user_id. A match upgrades the status to
+   ``verified`` because X itself confirmed that this handle belongs
+   to the session's user_id. A mismatch is NOT verified -- that's
+   the whole point of the check.
 
 Returned shape
 --------------
 Every entry point returns an :class:`Identity` dataclass:
 
-* ``status`` - "verified" | "partial" | "none"
-* ``handle``, ``user_id`` - whatever we managed to resolve
-* ``source``  - short tag describing *how* we got the handle
-  ("rest", "handle-match", "cookie", "none")
-* ``detail``  - diagnostic string the UI can show in the Troubleshooting
-  menu if the user wants to know why verification fell back
+* ``status``  - ``"verified"`` | ``"partial"`` | ``"none"``.
+* ``handle``  - the account's @screen_name, without the ``@``, when
+  known (REST whoami returned it, or GraphQL handle-match confirmed
+  it).
+* ``user_id`` - numeric user id as a string, when known (REST whoami
+  or twid cookie).
+* ``source``  - short tag describing the strongest signal used:
+  ``"rest"``, ``"handle-match"``, ``"twid"``, ``"cookie"``, ``"none"``.
+* ``detail``  - human-readable diagnostic. Safe to show in the UI;
+  callers get this verbatim in the partial banner to explain what
+  the tool is able to prove.
 """
 
 from __future__ import annotations
@@ -53,27 +61,15 @@ from .actions import ActionError, Credentials, build_session, whoami
 # Identity
 # ---------------------------------------------------------------------------
 
-# ``twid`` cookie encodes the numeric user id as "u%3D<id>" (url-encoded)
-# or "u=<id>" depending on where in the pipeline we pulled it from.
-_TWID_USER_ID = re.compile(r"u(?:%3D|=)(\d+)")
-
 
 @dataclass
 class Identity:
-    """Structured result of an identity check.
-
-    Attributes:
-        status:   one of ``verified``, ``partial``, ``none``.
-        handle:   the account's @screen_name (without ``@``), if known.
-        user_id:  numeric user id as a string, if known.
-        source:   short tag describing how we resolved ``handle`` --
-                  ``rest``, ``handle-match``, ``cookie``, or ``none``.
-        detail:   human-readable diagnostic. Safe to show in UI.
-    """
+    """Structured result of an identity check."""
 
     status: str  # "verified" | "partial" | "none"
     handle: Optional[str] = None
     user_id: Optional[str] = None
+    # "rest", "handle-match", "twid", "cookie", or "none".
     source: str = "none"
     detail: str = ""
 
@@ -85,51 +81,123 @@ class Identity:
     def has_cookies(self) -> bool:
         return self.status in ("verified", "partial")
 
-    # Convenience for the menu header -- single line, no styling.
     def one_liner(self) -> str:
+        """Compact single-line summary for the menu header. Plain text,
+        no styling -- the UI layer wraps this in Rich markup so the
+        same string can be reused in test assertions."""
         if self.status == "verified" and self.handle:
             return f"@{self.handle} verified"
         if self.status == "partial":
             if self.handle:
                 return f"@{self.handle} (not verified)"
             if self.user_id:
-                return f"user_id {self.user_id} (identity not verified)"
+                # Distinguish the twid-only case explicitly; the menu
+                # header was previously showing this state as "cookies
+                # saved, identity not verified" which hid the fact that
+                # we actually knew the numeric user id.
+                return f"user id {self.user_id} from twid"
             return "cookies saved, identity not verified"
         return "not logged in"
 
 
 # ---------------------------------------------------------------------------
-# Signals
+# Parsing helpers
+# ---------------------------------------------------------------------------
+
+# A raw numeric twid (user_id only, no "u=" prefix) is what X's mobile
+# app occasionally stores; we accept that form too so power users can
+# paste just the digits.
+_NUMERIC_ONLY = re.compile(r"^\d+$")
+
+# Within a cookie value we look for a "u=<digits>" pair. The value may
+# arrive url-encoded (u%3D), unquoted, wrapped in double quotes, or
+# preceded/followed by other key=value pairs -- all are tolerated.
+_TWID_USER_ID = re.compile(r"u(?:%3D|=)(\d+)")
+
+
+def parse_twid_user_id(raw: Optional[str]) -> Optional[str]:
+    """Extract the numeric user_id from a user-supplied twid string.
+
+    Accepts every form X (or a careless paste) can produce:
+
+      * ``"u=1234567890"`` -- the canonical unescaped form.
+      * ``'"u=1234567890"'`` -- wrapped in double quotes (DevTools
+        occasionally copies cookies this way).
+      * ``"u%3D1234567890"`` -- url-encoded.
+      * ``"1234567890"`` -- bare numeric string, if the user pasted
+        only the id portion.
+      * Extra junk before or after is ignored, so values like
+        ``"kdt=...; u=1234; sess=..."`` also work.
+
+    Returns the numeric user_id as a string, or None when nothing
+    recognisable is present. Never raises, never prints.
+    """
+    if raw is None:
+        return None
+    s = str(raw).strip()
+    if not s:
+        return None
+    # Strip enclosing quotes if present.
+    if len(s) >= 2 and s[0] == s[-1] and s[0] in ("'", '"'):
+        s = s[1:-1].strip()
+    if not s:
+        return None
+
+    # Fast path: bare numeric id.
+    if _NUMERIC_ONLY.match(s):
+        return s
+
+    # Otherwise look for the u=<digits> pattern anywhere in the value.
+    m = _TWID_USER_ID.search(s)
+    return m.group(1) if m else None
+
+
+def normalize_handle(raw: Optional[str]) -> Optional[str]:
+    """Return a canonical X screen_name from whatever the user typed.
+
+    Strips leading ``@`` (any number of them, for paranoia), trims
+    whitespace, and lowercases. Returns None for empty / whitespace
+    input so callers can `if not normalize_handle(x):` cleanly.
+
+    X screen_names are themselves case-insensitive; lowercasing here
+    means handle comparisons elsewhere in the codebase don't have to
+    spell that out every time.
+    """
+    if raw is None:
+        return None
+    s = str(raw).strip().lstrip("@").strip()
+    return s.lower() or None
+
+
+# ---------------------------------------------------------------------------
+# Session signals
 # ---------------------------------------------------------------------------
 
 def extract_twid_user_id(session: requests.Session) -> Optional[str]:
-    """Pull the numeric user id out of the ``twid`` cookie, if present.
+    """Pull the numeric user id out of a session's ``twid`` cookie, if
+    present. Returns None when absent or malformed; never raises.
 
-    Returns None if the cookie is missing or malformed. Never raises.
+    Delegates parsing to :func:`parse_twid_user_id` so the same rules
+    apply whether the twid arrives via the cookie jar or via direct
+    user input.
     """
     twid = ""
     for c in session.cookies:
         if c.name == "twid":
             twid = c.value or ""
             break
-    if not twid:
-        return None
-    m = _TWID_USER_ID.search(twid)
-    return m.group(1) if m else None
+    return parse_twid_user_id(twid)
 
 
 def _has_auth_cookies(session: requests.Session) -> bool:
-    """Return True if the session jar holds non-empty ``auth_token`` *and*
-    ``ct0`` cookies.
+    """Return True when the session jar has non-empty ``auth_token``
+    *and* ``ct0`` cookies.
 
-    This is a weaker signal than the twid cookie (which also carries the
-    numeric user id), but it's enough to distinguish "the user saved
-    cookies that simply failed verification" from "there are no cookies
-    at all". Without this check, a freshly-built session (where only
-    the two user-provided cookies have been set, and ``twid`` hasn't
-    arrived yet) would be indistinguishable from an empty session and
-    would incorrectly show as ``status="none"`` / "Not logged in" right
-    after the user had just pasted their cookies.
+    This is a weaker signal than ``twid`` (which also carries the
+    user_id), but it lets us distinguish "the user just pasted cookies
+    that couldn't be verified" from "no cookies at all" -- without
+    it, a freshly-built session would look identical to an empty one
+    immediately after login.
     """
     have_auth = False
     have_ct0 = False
@@ -146,23 +214,27 @@ def _try_rest(session: requests.Session) -> tuple[Optional[dict], Optional[str]]
     try:
         return whoami(session), None
     except ActionError as exc:
-        return None, str(exc).split("\n", 1)[0]  # first line only
+        return None, str(exc).split("\n", 1)[0]  # first line only for UI
 
 
 def _try_handle_match(
-    session: requests.Session, handle: str, twid_user_id: Optional[str]
+    session: requests.Session,
+    handle: str,
+    twid_user_id: str,
 ) -> Optional[tuple[str, str]]:
-    """Resolve ``handle`` via GraphQL and confirm it matches twid.
+    """Resolve ``handle`` via GraphQL and confirm it matches the twid
+    user_id.
 
-    Returns ``(user_id, "handle-match")`` only when the resolved rest_id
-    equals the numeric user_id encoded in the twid cookie. Anything
-    less conclusive returns None -- we do NOT blindly trust a handle the
-    user typed; that would defeat the whole safety check.
+    Returns ``(resolved_user_id, "handle-match")`` ONLY when the ids
+    match. A mismatch (or any error) returns None. We deliberately
+    do NOT return the handle the user typed as "verified" just because
+    they typed it -- the whole point of the match is that X itself has
+    to say yes.
     """
     if not handle or not twid_user_id:
         return None
-    # Import lazily so auth.py doesn't pull in the resolver module unless
-    # a handle-match is actually attempted. Keeps `xtool whoami` fast.
+    # Lazy import -- keeps `xtool whoami` fast when no GraphQL call is
+    # needed (e.g. REST whoami succeeded or no handle was supplied).
     try:
         from .resolver import ResolverError, resolve_screen_name
     except ImportError:
@@ -186,23 +258,26 @@ def verify_identity(
     expect_handle: Optional[str] = None,
     session: Optional[requests.Session] = None,
 ) -> Identity:
-    """Best-effort identity check.
+    """Best-effort identity check. Never raises.
 
-    Args:
-        creds: loaded :class:`~xtool.actions.Credentials`.
-        expect_handle: when the caller knows (or the user claims) the
-            account handle, we can upgrade a ``partial`` result to
-            ``verified`` by confirming the handle resolves to the same
-            user_id we see in the twid cookie.
-        session: reuse an existing session if the caller already built
-            one. A fresh session is created otherwise.
+    Decision order:
 
-    Returns:
-        An :class:`Identity`. Never raises -- callers get a structured
-        ``status="none"`` on total failure instead of an exception.
+    1. REST whoami succeeds              -> ``verified`` (source ``rest``).
+    2. twid cookie present AND
+       expect_handle resolves to same id -> ``verified`` (``handle-match``).
+    3. twid cookie present, no match     -> ``partial`` (``twid``).
+    4. auth_token + ct0 in the jar,
+       but no twid                       -> ``partial`` (``cookie``).
+    5. no signal at all                  -> ``none``.
+
+    ``expect_handle`` is normalized before use, so the caller can pass
+    ``"@Veldorakite"`` or ``"VELDORAKITE"`` and handle-match will still
+    work. The GraphQL path is the fallback that keeps the tool honest
+    when X's REST identity endpoints are 404ing.
     """
     sess = session or build_session(creds)
 
+    # --- 1. REST fast path ------------------------------------------------
     rest_result, rest_error = _try_rest(sess)
     if rest_result:
         return Identity(
@@ -213,42 +288,54 @@ def verify_identity(
             detail="identity confirmed via X REST endpoint",
         )
 
+    # --- 2. twid + handle-match via GraphQL -------------------------------
     twid_user_id = extract_twid_user_id(sess)
+    normalized_handle = normalize_handle(expect_handle)
 
-    if expect_handle and twid_user_id:
-        match = _try_handle_match(sess, expect_handle.lstrip("@"), twid_user_id)
+    if normalized_handle and twid_user_id:
+        match = _try_handle_match(sess, normalized_handle, twid_user_id)
         if match:
             resolved_id, src = match
             return Identity(
                 status="verified",
-                handle=expect_handle.lstrip("@"),
+                handle=normalized_handle,
                 user_id=resolved_id,
                 source=src,
                 detail=(
-                    "identity confirmed by matching @handle -> user_id "
-                    "against the twid session cookie"
+                    "identity confirmed: GraphQL UserByScreenName resolved "
+                    f"@{normalized_handle} to user_id {resolved_id}, which "
+                    "matches the twid cookie."
                 ),
             )
 
+    # --- 3. twid only -----------------------------------------------------
     if twid_user_id:
+        detail = (
+            "cookies are valid and the twid cookie identifies the session "
+            f"as user_id {twid_user_id}. "
+        )
+        if normalized_handle:
+            # We had a handle but couldn't confirm it -- either
+            # UserByScreenName failed, or the handle resolved to a
+            # different id. Either way, don't claim verified.
+            detail += (
+                f"Could not confirm @{normalized_handle} via GraphQL; "
+                "the handle may be wrong, protected, or the lookup failed."
+            )
+        else:
+            detail += (
+                "No handle was supplied; pass --expect-handle to confirm "
+                "this cookie belongs to a specific @screen_name."
+            )
         return Identity(
             status="partial",
             handle=None,
             user_id=twid_user_id,
-            source="cookie",
-            detail=(
-                "cookies are present (twid cookie carries a user_id) but "
-                "X's identity endpoints could not be reached. "
-                + (rest_error or "")
-            ).strip(),
+            source="twid",
+            detail=detail.strip(),
         )
 
-    # No twid yet (can happen right after login -- X sets twid as a
-    # response cookie, so a freshly-built session only has the
-    # user-supplied auth_token+ct0). If those two are both present we
-    # still report ``partial`` rather than ``none`` so the UI doesn't
-    # claim "Not logged in" immediately after the user just pasted
-    # valid-looking cookies.
+    # --- 4. auth_token + ct0 only -----------------------------------------
     if _has_auth_cookies(sess):
         return Identity(
             status="partial",
@@ -262,6 +349,7 @@ def verify_identity(
             ).strip(),
         )
 
+    # --- 5. nothing at all ------------------------------------------------
     return Identity(
         status="none",
         source="none",
@@ -277,8 +365,9 @@ def verify_from_cookie_file(
     *,
     expect_handle: Optional[str] = None,
 ) -> Identity:
-    """Load cookies from disk and verify. Returns a "none" Identity on
-    any load error so callers don't have to handle two exception paths."""
+    """Load cookies from disk and verify. Returns a ``status="none"``
+    Identity on any load error, so callers don't need two exception
+    paths."""
     from pathlib import Path
 
     p = Path(cookies_path)
