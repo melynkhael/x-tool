@@ -34,6 +34,7 @@ from .ui import (
     ask_choice,
     ask_input,
     ask_confirm,
+    ask_secret,
     success,
     warning,
     error,
@@ -114,10 +115,15 @@ def run_menu() -> int:
         print_identity_status(_state.get("identity"))
         console.print()
         print_menu(MENU_ITEMS, title="What would you like to do?")
+        # Blank input is still treated as "Exit" (default="0"), but we
+        # hide the "[0]" suffix because users found it confusing --
+        # showing "[0]" next to "Choose" suggests 0 is just one of
+        # many options rather than what happens on Enter.
         choice = ask_choice(
-            "Choose",
+            "Choose option (0-9, t)",
             valid=[k for k, _ in MENU_ITEMS],
             default="0",
+            hide_default=True,
         )
 
         try:
@@ -169,14 +175,25 @@ def _menu_login() -> None:
     console.print("   3. Go to Application > Cookies > https://x.com")
     console.print("   4. Copy the values of [bold]auth_token[/bold] and [bold]ct0[/bold].")
     console.print()
+    console.print(
+        "  [dim]Note: the prompts below use hidden input -- nothing will "
+        "appear as you paste. That's intentional; the cookie values are "
+        "sensitive.[/dim]"
+    )
+    console.print()
 
-    auth_token = ask_input("auth_token", secret=True)
-    if not auth_token:
-        error("auth_token is required.")
+    # Collect both secrets up front. Reject empty / whitespace / too-
+    # short values here instead of saving a broken cookies.json the
+    # user would only discover at the first bulk action.
+    auth_token, at_err = ask_secret("auth_token", min_length=10)
+    if at_err:
+        error(f"auth_token is {at_err}. Cookies were not saved.")
+        warning("Please paste the cookie value again.")
         return
-    ct0 = ask_input("ct0", secret=True)
-    if not ct0:
-        error("ct0 is required.")
+    ct0, ct_err = ask_secret("ct0", min_length=10)
+    if ct_err:
+        error(f"ct0 is {ct_err}. Cookies were not saved.")
+        warning("Please paste the cookie value again.")
         return
 
     from .actions import Credentials
@@ -185,18 +202,26 @@ def _menu_login() -> None:
         creds = Credentials(auth_token=auth_token, ct0=ct0)
     except ValueError as exc:
         error(str(exc))
+        warning("Cookies were not saved. Please paste the cookie values again.")
         return
 
     with warnings.catch_warnings(record=True):
         warnings.simplefilter("always")
         creds.to_file(COOKIES_PATH)
+    success(f"Cookies saved to {COOKIES_PATH}")
 
     # Optional handle hint lets us upgrade "partial" to "verified" via
-    # the handle-match fallback when the REST endpoints are dead.
-    expect = ask_input(
-        "Your X @handle (optional, helps verify identity)",
-        default=_state.get("handle") or "",
-    )
+    # the handle-match fallback when the REST endpoints are dead. Keep
+    # the prompt short so it renders on one line in narrow Termux
+    # terminals.
+    default_handle = _state.get("handle") or ""
+    handle_prompt = "X handle without @ (optional)"
+    if default_handle:
+        # ask_input already prints "[default]" when a default is set;
+        # no need to embed it in the prompt text.
+        expect = ask_input(handle_prompt, default=default_handle)
+    else:
+        expect = ask_input(handle_prompt)
     expect_clean = expect.lstrip("@").strip() or None
     if expect_clean:
         _state["handle"] = expect_clean

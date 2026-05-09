@@ -673,3 +673,362 @@ class TestWizardRefreshIdentity:
         )
         wizard._refresh_identity(force=True)
         assert wizard._state["handle"] == "neo"
+
+
+
+# ── Login UX bug fixes (hidden-input clarity, validation, saved-but-unverified) ──
+
+class _FakeCookieLogin:
+    def __init__(self, name, value, domain=".x.com"):
+        self.name = name
+        self.value = value
+        self.domain = domain
+
+
+class _FakeJarLogin:
+    def __init__(self, cookies=()):
+        self._cookies = list(cookies)
+
+    def __iter__(self):
+        return iter(self._cookies)
+
+
+class _FakeSessionLogin:
+    def __init__(self, cookies=()):
+        self.cookies = _FakeJarLogin(cookies)
+
+
+class TestAskSecret:
+    """ask_secret makes hidden input obvious and never echoes the value."""
+
+    def test_prompt_says_hidden(self, monkeypatch, capsys):
+        """The prompt text itself must mention that input is hidden."""
+        captured_prompt = {}
+
+        def fake_getpass(prompt):
+            captured_prompt["text"] = prompt
+            return "a" * 40
+
+        monkeypatch.setattr("getpass.getpass", fake_getpass)
+        from xtool.ui import ask_secret
+        ask_secret("auth_token")
+        assert "hidden" in captured_prompt["text"].lower()
+        assert "paste" in captured_prompt["text"].lower()
+
+    def test_captured_confirmation_shows_length_not_value(
+        self, monkeypatch, capsys
+    ):
+        """After input, we print the char count -- never the value."""
+        secret_value = "deadbeef" * 5  # 40 chars
+        monkeypatch.setattr("getpass.getpass", lambda p: secret_value)
+        from xtool.ui import ask_secret
+        value, err = ask_secret("auth_token")
+        out = capsys.readouterr().out
+        assert err is None
+        assert value == secret_value
+        assert "auth_token captured:" in out
+        assert "40 chars" in out
+        # The actual secret must never appear in the output.
+        assert secret_value not in out
+
+    def test_empty_rejected(self, monkeypatch):
+        monkeypatch.setattr("getpass.getpass", lambda p: "")
+        from xtool.ui import ask_secret
+        value, err = ask_secret("auth_token")
+        assert value == ""
+        assert err == "empty"
+
+    def test_whitespace_only_rejected(self, monkeypatch):
+        monkeypatch.setattr("getpass.getpass", lambda p: "   \t  ")
+        from xtool.ui import ask_secret
+        value, err = ask_secret("ct0")
+        assert value == ""
+        assert err and "whitespace" in err
+
+    def test_too_short_rejected(self, monkeypatch):
+        monkeypatch.setattr("getpass.getpass", lambda p: "abc")
+        from xtool.ui import ask_secret
+        value, err = ask_secret("auth_token", min_length=10)
+        assert value == ""
+        assert err and "too short" in err
+
+    def test_min_length_boundary(self, monkeypatch):
+        """Exactly min_length is accepted."""
+        monkeypatch.setattr("getpass.getpass", lambda p: "1234567890")
+        from xtool.ui import ask_secret
+        value, err = ask_secret("auth_token", min_length=10)
+        assert err is None
+        assert value == "1234567890"
+
+
+class TestMenuLoginValidation:
+    """The menu login flow refuses to save broken cookies."""
+
+    def _run_login(self, monkeypatch, inputs):
+        """Drive _menu_login() with a queued list of getpass/input responses."""
+        from xtool import wizard, auth as _auth, ui
+
+        getpass_queue = list(inputs.get("getpass", []))
+        input_queue = list(inputs.get("input", []))
+
+        monkeypatch.setattr("getpass.getpass", lambda p: getpass_queue.pop(0))
+        monkeypatch.setattr("builtins.input", lambda p="": input_queue.pop(0))
+
+        saved = {"path": None, "creds": None}
+
+        class FakeCreds:
+            def __init__(self, auth_token, ct0):
+                self.auth_token = auth_token
+                self.ct0 = ct0
+                saved["creds"] = (auth_token, ct0)
+            def to_file(self, path):
+                saved["path"] = str(path)
+                return True
+
+        monkeypatch.setattr("xtool.actions.Credentials", FakeCreds)
+        # Verification never needs to actually run for these tests.
+        monkeypatch.setattr(
+            _auth,
+            "verify_identity",
+            lambda creds, expect_handle=None: _auth.Identity(
+                status="partial", source="cookie",
+                detail="no network in tests",
+            ),
+        )
+        # Reset wizard state so each call is deterministic.
+        wizard._state["identity"] = None
+        wizard._state["handle"] = None
+        wizard._menu_login()
+        return saved
+
+    def test_empty_auth_token_not_saved(self, monkeypatch, capsys):
+        saved = self._run_login(
+            monkeypatch, {"getpass": [""], "input": []}
+        )
+        out = " ".join(capsys.readouterr().out.split())
+        assert saved["creds"] is None, "Credentials must not be constructed"
+        assert saved["path"] is None, "Cookies must not be written to disk"
+        assert "auth_token is empty" in out
+        assert "Cookies were not saved" in out
+
+    def test_empty_ct0_not_saved(self, monkeypatch, capsys):
+        saved = self._run_login(
+            monkeypatch,
+            {"getpass": ["a" * 40, ""], "input": []},
+        )
+        out = " ".join(capsys.readouterr().out.split())
+        assert saved["creds"] is None
+        assert saved["path"] is None
+        assert "ct0 is empty" in out
+        assert "Cookies were not saved" in out
+
+    def test_whitespace_only_auth_token_not_saved(self, monkeypatch, capsys):
+        saved = self._run_login(
+            monkeypatch, {"getpass": ["   "], "input": []}
+        )
+        out = " ".join(capsys.readouterr().out.split())
+        assert saved["creds"] is None
+        assert "whitespace" in out or "empty" in out
+        assert "Cookies were not saved" in out
+
+    def test_short_auth_token_not_saved(self, monkeypatch, capsys):
+        saved = self._run_login(
+            monkeypatch, {"getpass": ["abc"], "input": []}
+        )
+        out = " ".join(capsys.readouterr().out.split())
+        assert saved["creds"] is None
+        assert "too short" in out
+        assert "Cookies were not saved" in out
+
+    def test_short_ct0_not_saved(self, monkeypatch, capsys):
+        saved = self._run_login(
+            monkeypatch,
+            {"getpass": ["a" * 40, "xy"], "input": []},
+        )
+        out = " ".join(capsys.readouterr().out.split())
+        assert saved["creds"] is None
+        assert "too short" in out
+
+    def test_valid_cookies_are_saved(self, monkeypatch, capsys):
+        saved = self._run_login(
+            monkeypatch,
+            {
+                "getpass": ["a" * 40, "b" * 40],
+                # ask_input("X handle without @ (optional)"): blank
+                "input": [""],
+            },
+        )
+        assert saved["creds"] == ("a" * 40, "b" * 40)
+        assert saved["path"] and saved["path"].endswith("cookies.json")
+
+
+class TestSavedButUnverifiedIdentity:
+    """After login, if REST whoami 404s and there is no twid yet, the
+    identity must NOT be reported as 'none' just because the session
+    happens to hold only auth_token + ct0."""
+
+    def _patch_whoami_404(self, monkeypatch):
+        from xtool import auth as _auth
+        from xtool.actions import ActionError
+
+        def fake_whoami(session, timeout=20.0):
+            raise ActionError("REST 404")
+
+        monkeypatch.setattr(_auth, "whoami", fake_whoami)
+
+    def test_auth_cookies_present_no_twid_returns_partial(self, monkeypatch):
+        from xtool import auth as _auth
+        from xtool.actions import Credentials
+
+        self._patch_whoami_404(monkeypatch)
+
+        def fake_build_session(creds):
+            return _FakeSessionLogin([
+                _FakeCookieLogin("auth_token", creds.auth_token),
+                _FakeCookieLogin("ct0", creds.ct0),
+            ])
+
+        monkeypatch.setattr(_auth, "build_session", fake_build_session)
+
+        ident = _auth.verify_identity(Credentials("a" * 40, "b" * 40))
+        assert ident.status == "partial"
+        assert ident.has_cookies is True
+        assert ident.verified is False
+        assert ident.source == "cookie"
+
+    def test_no_cookies_still_returns_none(self, monkeypatch):
+        """Belt-and-suspenders: truly empty session stays 'none'."""
+        from xtool import auth as _auth
+        from xtool.actions import Credentials
+
+        self._patch_whoami_404(monkeypatch)
+        monkeypatch.setattr(
+            _auth, "build_session",
+            lambda creds: _FakeSessionLogin([]),
+        )
+        ident = _auth.verify_identity(Credentials("a" * 40, "b" * 40))
+        assert ident.status == "none"
+        assert ident.has_cookies is False
+
+    def test_partial_identity_line_does_not_say_not_logged_in(self):
+        """The header one-liner for partial must be distinct from none."""
+        from xtool.auth import Identity
+        from xtool.ui import format_identity_line
+
+        partial = format_identity_line(Identity(status="partial")).plain
+        none_line = format_identity_line(Identity(status="none")).plain
+
+        assert "cookies saved, identity not verified" in partial
+        assert "not logged in" in none_line
+        assert partial != none_line
+
+    def test_partial_banner_does_not_say_not_logged_in(self, capsys):
+        """The post-login banner for partial must not render the red
+        'Not logged in.' panel."""
+        from xtool.auth import Identity
+        from xtool.ui import print_identity_banner
+
+        print_identity_banner(Identity(status="partial"))
+        out = capsys.readouterr().out
+        assert "Not logged in" not in out
+        assert "Cookies were saved" in out
+        assert "identity verification failed" in out
+
+
+class TestMenuPromptWording:
+    """The main menu prompt must no longer display the "[0]" default."""
+
+    def test_ask_choice_hide_default_strips_bracket(self, monkeypatch):
+        captured = {}
+        monkeypatch.setattr("builtins.input", lambda p: (captured.setdefault("p", p), "0")[1])
+        from xtool.ui import ask_choice
+        ask_choice("Choose option (0-9, t)", valid=["0"], default="0", hide_default=True)
+        assert "[0]" not in captured["p"]
+        assert "Choose option" in captured["p"]
+
+    def test_ask_choice_still_defaults_on_empty_input(self, monkeypatch):
+        """Blank input still maps to the hidden default."""
+        monkeypatch.setattr("builtins.input", lambda p: "")
+        from xtool.ui import ask_choice
+        result = ask_choice("Choose option", valid=["0"], default="0", hide_default=True)
+        assert result == "0"
+
+    def test_menu_loop_prompt_text(self, monkeypatch, capsys):
+        """Drive one full iteration of run_menu() and verify the prompt
+        text printed to the user no longer includes '[0]'."""
+        from xtool import wizard, auth as _auth
+
+        monkeypatch.setattr(
+            _auth, "verify_from_cookie_file",
+            lambda path, *, expect_handle=None: _auth.Identity(status="none"),
+        )
+
+        captured = {"prompts": []}
+        original_input = __builtins__["input"] if isinstance(__builtins__, dict) else __builtins__.input
+
+        def fake_input(prompt=""):
+            captured["prompts"].append(prompt)
+            return "0"  # exit
+
+        monkeypatch.setattr("builtins.input", fake_input)
+        wizard._state["identity"] = None
+        wizard._state["handle"] = None
+        wizard.run_menu()
+
+        # Every prompt string must avoid "[0]".
+        assert captured["prompts"], "run_menu should have prompted at least once"
+        choose_prompts = [p for p in captured["prompts"] if "Choose" in p]
+        assert choose_prompts
+        for p in choose_prompts:
+            assert "[0]" not in p, f"prompt leaked [0]: {p!r}"
+            assert "Choose option" in p
+
+
+class TestHandlePromptIsShort:
+    """The handle prompt must be short so it doesn't wrap in Termux."""
+
+    def test_handle_prompt_is_compact(self, monkeypatch):
+        """_menu_login's handle prompt text must be under ~50 chars
+        so narrow terminals render it on one line."""
+        from xtool import wizard, auth as _auth
+
+        getpass_queue = ["a" * 40, "b" * 40]
+        input_prompts = []
+
+        def fake_input(p=""):
+            input_prompts.append(p)
+            return ""
+
+        monkeypatch.setattr("getpass.getpass", lambda p: getpass_queue.pop(0))
+        monkeypatch.setattr("builtins.input", fake_input)
+
+        # Skip any side-effects beyond constructing credentials.
+        class FakeCreds:
+            def __init__(self, auth_token, ct0):
+                pass
+            def to_file(self, path):
+                return True
+
+        monkeypatch.setattr("xtool.actions.Credentials", FakeCreds)
+        monkeypatch.setattr(
+            _auth,
+            "verify_identity",
+            lambda creds, expect_handle=None: _auth.Identity(status="partial"),
+        )
+        wizard._state["identity"] = None
+        wizard._state["handle"] = None
+        wizard._menu_login()
+
+        # The handle prompt is the last input() call during login.
+        assert input_prompts, "expected at least one input prompt"
+        handle_prompt = input_prompts[-1]
+        assert "handle" in handle_prompt.lower()
+        # Must not contain the old "identity" language that was
+        # wrapping on narrow Termux terminals.
+        assert "helps verify identity" not in handle_prompt
+        # Prompt text (including the leading two-space indent and the
+        # trailing ": ") should be short.
+        assert len(handle_prompt) <= 50, (
+            f"handle prompt too long ({len(handle_prompt)} chars): "
+            f"{handle_prompt!r}"
+        )

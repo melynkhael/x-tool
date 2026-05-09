@@ -118,6 +118,29 @@ def extract_twid_user_id(session: requests.Session) -> Optional[str]:
     return m.group(1) if m else None
 
 
+def _has_auth_cookies(session: requests.Session) -> bool:
+    """Return True if the session jar holds non-empty ``auth_token`` *and*
+    ``ct0`` cookies.
+
+    This is a weaker signal than the twid cookie (which also carries the
+    numeric user id), but it's enough to distinguish "the user saved
+    cookies that simply failed verification" from "there are no cookies
+    at all". Without this check, a freshly-built session (where only
+    the two user-provided cookies have been set, and ``twid`` hasn't
+    arrived yet) would be indistinguishable from an empty session and
+    would incorrectly show as ``status="none"`` / "Not logged in" right
+    after the user had just pasted their cookies.
+    """
+    have_auth = False
+    have_ct0 = False
+    for c in session.cookies:
+        if c.name == "auth_token" and (c.value or "").strip():
+            have_auth = True
+        elif c.name == "ct0" and (c.value or "").strip():
+            have_ct0 = True
+    return have_auth and have_ct0
+
+
 def _try_rest(session: requests.Session) -> tuple[Optional[dict], Optional[str]]:
     """Run REST whoami. Returns (result, error_detail)."""
     try:
@@ -216,6 +239,25 @@ def verify_identity(
             detail=(
                 "cookies are present (twid cookie carries a user_id) but "
                 "X's identity endpoints could not be reached. "
+                + (rest_error or "")
+            ).strip(),
+        )
+
+    # No twid yet (can happen right after login -- X sets twid as a
+    # response cookie, so a freshly-built session only has the
+    # user-supplied auth_token+ct0). If those two are both present we
+    # still report ``partial`` rather than ``none`` so the UI doesn't
+    # claim "Not logged in" immediately after the user just pasted
+    # valid-looking cookies.
+    if _has_auth_cookies(sess):
+        return Identity(
+            status="partial",
+            handle=None,
+            user_id=None,
+            source="cookie",
+            detail=(
+                "cookies are saved (auth_token + ct0 present) but X's "
+                "identity endpoints could not be reached. "
                 + (rest_error or "")
             ).strip(),
         )
