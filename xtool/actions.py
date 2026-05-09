@@ -116,6 +116,26 @@ class Credentials:
         return True
 
 
+def _delete_retweet_verify(body: dict) -> bool:
+    """DeleteRetweet returns HTTP 200 with an EMPTY source_tweet_results
+    when the passed id is a wrapper/repost status id instead of the
+    actual source tweet id. The X server accepts the request but no
+    unretweet actually occurs. Only a response with
+    ``data.unretweet.source_tweet_results.result.rest_id`` represents
+    a real success.
+    """
+    try:
+        res = body["data"]["unretweet"]["source_tweet_results"]
+    except (KeyError, TypeError):
+        return False
+    if not isinstance(res, dict) or not res:
+        return False
+    result = res.get("result")
+    if not isinstance(result, dict):
+        return False
+    return bool(result.get("rest_id"))
+
+
 @dataclass(frozen=True)
 class Action:
     """Description of one GraphQL mutation xtool knows how to run."""
@@ -126,6 +146,13 @@ class Action:
     gone_tense: str  # "already_gone" / "not_retweeted" / "not_liked"
     # Substrings that mean "there is nothing to do for this id".
     gone_markers: tuple[str, ...] = ()
+    # Optional verifier run on a successful HTTP 200 body. If it
+    # returns False we downgrade the outcome to ``gone_tense`` (a
+    # no-op, not a real mutation). Used for DeleteRetweet where X
+    # returns 200 with an empty source_tweet_results when the id
+    # passed is the archive wrapper id instead of the source tweet
+    # id.
+    verify_success: Optional[Callable[[dict], bool]] = None
 
     def query_id(self, *, offline: bool = False) -> str:
         return get_query_id(self.name, offline=offline)
@@ -158,6 +185,10 @@ ACTIONS: dict[str, Action] = {
             "has not been retweeted",
             "sorry, you are not allowed",
         ),
+        # X returns HTTP 200 + {"data":{"unretweet":{"source_tweet_results":{}}}}
+        # when the id you passed is not a source/original tweet id
+        # (e.g. the archive wrapper id). That's a no-op, not a success.
+        verify_success=_delete_retweet_verify,
     ),
     "unlike": Action(
         name="UnfavoriteTweet",
@@ -406,6 +437,11 @@ def perform_action(
             body["already_gone"] = True
             return body
         raise ActionError(msg)
+    # Some mutations (DeleteRetweet) return 200 with an empty result
+    # object when they're effectively no-ops (e.g. wrong id). If the
+    # action has a verifier, let it downgrade the outcome.
+    if action.verify_success is not None and not action.verify_success(body):
+        body["already_gone"] = True
     # Preserve the raw response for callers that want to inspect it
     # (e.g. to verify the mutation actually took effect).
     body["_raw_response"] = True
