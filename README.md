@@ -1,239 +1,317 @@
 # X-Tool
+X / Twitter Account Cleanup
+by: melynkhael
 
-> Clean up your X (Twitter) account — delete tweets, undo retweets, remove likes.
-
-[![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue.svg)](https://python.org)
-[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Platform](https://img.shields.io/badge/platform-Termux%20%7C%20Linux%20%7C%20macOS%20%7C%20WSL-lightgrey.svg)](#installation)
-
----
-
-## What It Does
-
-X-Tool helps you bulk-clean your X/Twitter account using your downloaded data archive:
-
-- **Delete tweets** — originals, replies, or both
-- **Remove reposts** — resolves real source IDs from your live profile
-- **Unlike tweets** — from your like.js archive
-- **Interactive wizard** — no commands to memorize
-- **Resume support** — interrupted? Pick up where you left off
-- **Dry-run mode** — preview what will happen before committing
+A beginner-friendly tool that helps you clean up **your own** X (Twitter)
+account. Delete old tweets, remove replies, undo reposts, and clear
+likes — from a simple menu on your phone or computer.
 
 ---
 
-## Quick Start
+## What this tool does
 
-### Interactive Mode (Recommended)
+- Deletes tweets and replies from your account
+- Removes your reposts (retweets)
+- Removes your likes
+- Works from your downloaded X archive, so it can reach tweets the
+  API can no longer list
+- Runs from a single command: `xtool`
+- Shows a menu — you do not need to remember any commands
+- Has a **dry-run** mode so you can preview what will happen before
+  anything is deleted
+- Runs on Android (Termux), Linux, macOS, and WSL
+
+---
+
+## Safety warning
+
+This tool only works on your **own** account. It uses **your** session
+cookies — it cannot touch anyone else's account.
+
+Please read this before using it:
+
+- Deleted tweets **cannot be recovered**. Always run a **dry-run**
+  first.
+- Never share your `auth_token`, `ct0`, or `twid` cookies with anyone.
+  They give full access to your X session.
+- X's profile counters (tweet count, likes count) are cached and may
+  take minutes or hours to update after a cleanup.
+- Automating actions on X may violate X's Terms of Service. You use
+  this tool at your own risk.
+
+See [docs/SAFETY.md](docs/SAFETY.md) for more.
+
+---
+
+## What you need
+
+1. A logged-in X account (this is your account — the one you want
+   to clean).
+2. A copy of your X archive (X Settings → Your Account → Download an
+   archive of your data).
+3. Python 3.9 or newer.
+4. About 10 minutes for the first run.
+
+On Android, you'll also need the [Termux](https://f-droid.org/en/packages/com.termux/)
+app (install from F-Droid, **not** the Play Store — the Play Store
+version is out of date).
+
+---
+
+## Install on Termux
+
+```bash
+pkg update && pkg upgrade -y
+pkg install python python-pip git -y
+git clone https://github.com/melynkhael/x-tool.git ~/x-tool
+cd ~/x-tool
+bash install.sh
+```
+
+That's it. Type `xtool` to open the menu.
+
+For a longer walkthrough (including how to move your archive onto
+your phone), see [TERMUX_GUIDE.md](TERMUX_GUIDE.md).
+
+---
+
+## Update X-Tool
+
+The easiest way:
+
+```bash
+xtool update
+```
+
+This prints just a few short progress lines. Real errors are still
+shown, so you can tell the difference between "all good" and
+"something needs fixing".
+
+If `xtool update` cannot run (for example, you installed from a pip
+URL instead of a git clone), use:
+
+```bash
+cd ~/x-tool
+git pull --ff-only --quiet origin main
+bash install.sh --quiet
+```
+
+---
+
+## Start the menu
 
 ```bash
 xtool
 ```
 
-That's it. A guided menu walks you through everything:
+You'll see something like this:
 
 ```
- X-Tool — X / Twitter Account Cleanup  v0.2.0
+ X-Tool — X / Twitter Account Cleanup  v0.2.2
+  by: melynkhael
 
- What would you like to do?
+  Account: not logged in
 
-   1  Login / update cookies
+  What would you like to do?
+
+   1  Login / save cookies
    2  Load X archive
    3  Show archive stats
-   4  Delete original tweets
+   4  Delete tweets
    5  Delete replies
-   6  Delete originals + replies
-   7  Remove reposts / retweets
+   6  Delete tweets and replies
+   7  Remove reposts
    8  Remove likes
    9  Full cleanup (guided)
+   u  Update X-Tool
    t  Troubleshooting
    0  Exit
 ```
 
-### Android / Termux Quick Start
-
-```bash
-pkg install python python-pip git
-pip install git+https://github.com/melynkhael/x-tool.git
-xtool
-```
-
-See [TERMUX_GUIDE.md](TERMUX_GUIDE.md) for detailed Termux instructions.
+Type a number (or letter) and press Enter.
 
 ---
 
-## Installation
+## Login / save cookies
 
-### From GitHub (recommended)
+Choose option **1** in the menu.
 
-```bash
-pip install git+https://github.com/melynkhael/x-tool.git
-```
+X-Tool needs three cookies from your browser session:
 
-### From source
+- `auth_token` — required
+- `ct0` — required
+- `twid` — optional, but **strongly recommended** so X-Tool can
+  verify which account the cookies belong to
 
-```bash
-git clone https://github.com/melynkhael/x-tool.git
-cd x-tool
-bash install.sh
-```
+The easiest way to get them is the **Cookie-Editor** browser extension.
 
-### Requirements
+See the full step-by-step tutorial:
+**[docs/FIREFOX_COOKIE_EDITOR.md](docs/FIREFOX_COOKIE_EDITOR.md)**
 
-- Python 3.9+
-- `requests`, `python-dateutil`, `rich` (installed automatically)
+**Never** share these values with anyone. Do not paste them into
+screenshots, GitHub issues, Discord, Telegram, or public chats.
 
 ---
 
-## How It Works
+## How to find auth_token, ct0, and twid using Firefox + Cookie-Editor
 
-1. **Download your X archive** — X Settings > Your Account > Download an archive
-2. **Get your session cookies** — `auth_token` and `ct0` from your browser
-3. **Run X-Tool** — choose what to clean, confirm, done
+Quick version:
 
-X-Tool talks directly to X's web API using the same requests your browser makes. No third-party services, no OAuth apps, no API keys needed.
+1. Open Firefox.
+2. Install the Cookie-Editor extension from
+   [addons.mozilla.org](https://addons.mozilla.org/firefox/addon/cookie-editor/).
+3. Open [https://x.com](https://x.com) and log in to your X account.
+4. Click the Cookie-Editor icon while still on x.com.
+5. Find `auth_token` and copy its **value** (not the name).
+6. Find `ct0` and copy its **value**.
+7. Find `twid` and copy its **value** (looks like `u=1234567890`).
+8. Back in Termux, run `xtool` and choose **1 Login / save cookies**.
+9. Paste each value when prompted.
+10. Enter your X handle (without the `@`) when asked.
 
----
-
-## Features
-
-| Feature | Description |
-|---------|-------------|
-| Interactive menu | Guided wizard for all operations |
-| Bulk delete | Delete thousands of tweets at ~1/sec |
-| Smart unretweet | Live timeline resolver finds real source IDs |
-| Unlike | Remove all likes from your like.js archive |
-| Dry-run | Preview changes before executing |
-| Resume | Automatic — interrupted runs continue where they left off |
-| Rate limiting | Built-in safe rate limiting (1 req/sec default) |
-| Account safety | `--expect-account` prevents running on wrong account |
-| Logs | Every operation logged to `~/.xtool/logs/` |
-| Offline mode | Use cached/fallback query IDs without network |
+Full tutorial with screenshots and warnings:
+[docs/FIREFOX_COOKIE_EDITOR.md](docs/FIREFOX_COOKIE_EDITOR.md).
 
 ---
 
-## Advanced CLI
+## How to load your X archive
 
-For power users, all operations are available as direct commands:
+1. In X: Settings → Your Account → Download an archive of your data.
+2. Wait for the email from X. Download the ZIP to your device.
+3. On Android, copy it to your home folder and unzip it:
+   ```bash
+   cp /storage/emulated/0/Download/twitter-archive.zip ~/
+   cd ~
+   unzip twitter-archive.zip -d x-archive
+   ```
+4. In the menu, choose **2 Load X archive** and enter the folder
+   path (for example: `~/x-archive`).
 
-```bash
-# Parse archive
-xtool parse ~/x-archive/data/tweets.js -o tweets.jsonl
-
-# View stats
-xtool stats tweets.jsonl
-
-# Filter (keep only tweets before 2023)
-xtool filter tweets.jsonl --to 2023-01-01 -o old-tweets.jsonl
-
-# Delete with confirmation
-xtool delete old-tweets.jsonl --expect-account myhandle
-
-# Resolve live reposts and unretweet
-xtool resolve-retweets --handle myhandle -o reposts.jsonl
-xtool unretweet reposts.jsonl --expect-account myhandle
-
-# Unlike all likes
-xtool parse ~/x-archive/data/like.js --likes -o likes.jsonl
-xtool unlike likes.jsonl --expect-account myhandle
-
-# Dry-run any command
-xtool delete tweets.jsonl --dry-run
-```
-
-### All Commands
-
-| Command | Description |
-|---------|-------------|
-| `xtool` | Interactive menu |
-| `xtool menu` | Interactive menu (explicit) |
-| `xtool login` | Save X session cookies |
-| `xtool parse` | Convert archive JS to JSONL |
-| `xtool stats` | Show archive statistics |
-| `xtool filter` | Filter tweets by date/type/keyword |
-| `xtool delete` | Bulk delete tweets |
-| `xtool unretweet` | Bulk undo retweets |
-| `xtool unlike` | Bulk remove likes |
-| `xtool resolve-retweets` | Find source IDs from live profile |
-| `xtool discover` | Refresh GraphQL query IDs |
+X-Tool looks for `data/tweets.js`, `data/tweet.js`, and
+`data/like.js` automatically.
 
 ---
 
-## Safety & Limitations
+## How to remove reposts
 
-- **Deleted tweets cannot be recovered.** Always use `--dry-run` first.
-- **X rate limits** — the tool respects X's limits (~1 req/sec). Going faster risks temporary account locks.
-- **Profile counters lag** — X caches tweet/like counts. After cleanup, counters may take minutes to hours to update.
-- **Archive can be stale** — your downloaded archive is a snapshot. Tweets posted after the archive was generated won't be included.
-- **Reposts need live resolution** — archive wrapper IDs don't work for unretweet. The tool handles this automatically.
-- **Terms of Service** — automating X actions may violate X's ToS. Use at your own risk.
+1. Log in (option 1).
+2. Choose **7 Remove reposts**.
+3. Enter your X handle (without the `@`).
+4. X-Tool walks your live profile timeline to find the real source
+   tweet IDs.
+5. Review the count, confirm, and let it run.
+
+Reposts use a special resolver because the archive only contains
+wrapper IDs that will not work for the undo action.
 
 ---
 
-## FAQ
+## How to remove likes
 
-**Q: Is this safe?**
-A: The tool runs 100% locally. Your cookies never leave your machine. But deleted content is gone forever — use dry-run first.
+1. Make sure your archive is loaded (option 2).
+2. Choose **8 Remove likes**.
+3. Review the count, dry-run if you want, confirm, and let it run.
 
-**Q: Do I need an API key or developer account?**
-A: No. X-Tool uses the same web session your browser uses (cookies only).
+---
 
-**Q: Why do I need cookies instead of a password?**
-A: X's web client authenticates via session cookies. This is the same mechanism your browser uses — no password is stored or transmitted by X-Tool.
+## How to delete tweets/replies
 
-**Q: My repost count doesn't go down after running unretweet.**
-A: X caches profile counters aggressively. Wait 5-30 minutes and refresh your profile.
+1. Load your archive (option 2).
+2. Choose one of:
+   - **4 Delete tweets** — original tweets only
+   - **5 Delete replies** — replies only
+   - **6 Delete tweets and replies**
+3. Dry-run first, then confirm to delete for real.
 
-**Q: Can I undo a deletion?**
-A: No. Deleted tweets are permanently gone. Always dry-run first.
+---
 
-**Q: Does it work on Android?**
-A: Yes, via Termux. See [TERMUX_GUIDE.md](TERMUX_GUIDE.md).
+## Full cleanup guided mode
+
+Choose **9 Full cleanup (guided)**.
+
+X-Tool walks you through:
+
+1. Delete tweets
+2. Delete replies
+3. Remove reposts
+4. Remove likes
+
+Each step lets you say yes or no, so you stay in control.
+
+---
+
+## Dry-run vs real run
+
+**Always dry-run first.** A dry-run:
+
+- Counts what would change
+- Writes a log to `~/.xtool/logs/`
+- Does **not** contact X for deletions
+- Does **not** change anything on your account
+
+Only after a dry-run looks correct should you answer `yes` to the
+real run. Deleted tweets cannot be recovered.
 
 ---
 
 ## Troubleshooting
 
-| Problem | Solution |
-|---------|----------|
-| "authentication rejected" | Cookies expired. Re-login at x.com, run `xtool login` again. |
-| "rate limited" | Wait 15 min and retry. Don't increase `--rate` above 1. |
-| "no retweets found" | Profile may be cached. Or use `--debug` to inspect timeline shape. |
-| "query ID stale" | Run `xtool discover --refresh` to fetch new IDs from x.com. |
-| Network errors | Check VPN/firewall. Ensure x.com is reachable. |
+Some common states you may see at the top of the menu:
+
+- `Account: not logged in` — No cookies saved. Run option 1.
+- `Account: cookies saved, identity not verified` — auth_token and
+  ct0 are saved, but X-Tool cannot prove which account they belong
+  to. Add **twid** and your **handle** in option 1 to improve this.
+- `Account: user id ... from twid` — The `twid` cookie tells us the
+  numeric account ID, but the handle is not confirmed yet. Add your
+  handle in option 1.
+- `Account: @handle verified` — Identity confirmed. Safety checks
+  are fully active.
+
+If identity is not verified, your cookies may still work, but X-Tool
+cannot prove which account they belong to. **Always use dry-run first.**
+
+Full list of common problems and fixes:
+[docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
 
 ---
 
-## Privacy & Security
+## FAQ
 
-- All data stays on your device.
-- Cookies stored in `~/.xtool/cookies.json` (chmod 600).
-- No telemetry, analytics, or third-party services.
-- Delete your cookies when done: `rm ~/.xtool/cookies.json`
+**Is this safe?**
+It runs 100% on your device. Your cookies never leave your machine.
+But deleted tweets are gone forever — always dry-run first.
+
+**Do I need an API key?**
+No. X-Tool uses the same web session your browser uses (cookies only).
+
+**Why do I need cookies and not a password?**
+X's web client authenticates with session cookies. No password is
+stored or sent by X-Tool.
+
+**My repost count didn't go down.**
+X caches profile counters. Wait 5–30 minutes and refresh.
+
+**Can I undo a deletion?**
+No. That's why dry-run exists.
+
+**Does it work on Android?**
+Yes, via Termux. See [TERMUX_GUIDE.md](TERMUX_GUIDE.md).
+
+More questions and answers: [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
 
 ---
 
-## Roadmap
+## Advanced (optional)
 
-- [ ] Bookmark cleanup
-- [ ] DM cleanup (if X ever exposes the API)
-- [ ] Scheduled/timed cleanup
-- [ ] Export before delete (backup mode)
-- [ ] GUI/TUI with full Rich interface
-
----
-
-## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md).
-
----
-
-## Disclaimer
-
-This tool is provided as-is. Use at your own risk. The authors are not responsible for any account actions, bans, or data loss resulting from use of this tool. Automating actions on X may violate their Terms of Service.
+For power users, every menu action is also a CLI command. See
+`xtool --help` for the full list (`parse`, `stats`, `filter`,
+`delete`, `unretweet`, `unlike`, `resolve-retweets`, `discover`,
+`whoami`, `update`).
 
 ---
 
 ## License
 
-[MIT](LICENSE)
+[MIT](LICENSE). See also [SECURITY.md](SECURITY.md) and
+[CONTRIBUTING.md](CONTRIBUTING.md).

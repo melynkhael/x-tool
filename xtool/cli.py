@@ -147,10 +147,17 @@ LOGIN_HELP = """\
 [bold]How to grab your X session cookies[/bold]
 
   1. Open [cyan]https://x.com[/cyan] in a browser and log in.
-  2. Open DevTools (F12).
+  2. Open DevTools (F12) or install the Cookie-Editor extension.
      - Chrome/Edge: [yellow]Application -> Storage -> Cookies -> https://x.com[/yellow]
      - Firefox:     [yellow]Storage -> Cookies -> https://x.com[/yellow]
-  3. Copy the values of [bold]auth_token[/bold] and [bold]ct0[/bold].
+  3. Copy the values of [bold]auth_token[/bold], [bold]ct0[/bold], and [bold]twid[/bold].
+
+[dim]auth_token and ct0 are required. twid is optional but strongly
+recommended so X-Tool can verify the account. See
+docs/FIREFOX_COOKIE_EDITOR.md for a beginner-friendly tutorial.[/dim]
+
+[yellow]Never share these values with anyone. They grant full access
+to your X session.[/yellow]
 
 They will be saved to [cyan]~/.xtool/cookies.json[/cyan] with chmod 600.
 """
@@ -161,14 +168,15 @@ def cmd_login(args: argparse.Namespace) -> int:
     try:
         auth_token = input("auth_token: ").strip()
         ct0 = input("ct0: ").strip()
+        twid = input("twid (optional, press Enter to skip): ").strip() or None
     except (EOFError, KeyboardInterrupt):
         console.print("\n[red]aborted[/red]")
         return 1
     if not auth_token or not ct0:
-        console.print("[red]both values are required[/red]")
+        console.print("[red]auth_token and ct0 are required[/red]")
         return 1
     try:
-        creds = Credentials(auth_token=auth_token, ct0=ct0)
+        creds = Credentials(auth_token=auth_token, ct0=ct0, twid=twid)
     except ValueError as exc:
         console.print(f"[red]{exc}[/red]")
         return 1
@@ -186,7 +194,7 @@ def cmd_login(args: argparse.Namespace) -> int:
             "POSIX permissions; move the file somewhere private)[/yellow]"
         )
     # Quick sanity check: can we authenticate?
-    console.print("[dim]verifying cookies with X...[/dim]")
+    console.print("[dim]Verifying session with X...[/dim]")
     session = build_session(creds)
     try:
         who = whoami(session)
@@ -677,6 +685,21 @@ def cmd_menu(args: argparse.Namespace) -> int:
     return run_menu()
 
 
+def cmd_update(args: argparse.Namespace) -> int:
+    """Pull the latest code and reinstall the package in-place.
+
+    This is the beginner-friendly wrapper around::
+
+        git pull --ff-only --quiet origin main
+        python -m pip install -e . --upgrade --disable-pip-version-check -q
+
+    Real errors are surfaced; only the noisy happy-path output is
+    suppressed. See :mod:`xtool.updater` for the details.
+    """
+    from .updater import run_update
+    return run_update()
+
+
 def cmd_whoami(args: argparse.Namespace) -> int:
     """Show the current account identity from saved cookies.
 
@@ -755,6 +778,13 @@ def build_parser() -> argparse.ArgumentParser:
     # login
     sp = sub.add_parser("login", help="store X cookies in ~/.xtool/cookies.json")
     sp.set_defaults(func=cmd_login)
+
+    # update
+    sp = sub.add_parser(
+        "update",
+        help="pull latest X-Tool from GitHub and reinstall (beginner-friendly)",
+    )
+    sp.set_defaults(func=cmd_update)
 
     # whoami / account
     for name, helptext in (
