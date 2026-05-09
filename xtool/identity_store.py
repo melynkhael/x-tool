@@ -49,6 +49,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+from ._safe_io import ensure_private_dir, safe_write_json
+
 
 DEFAULT_PATH = Path(os.path.expanduser("~/.xtool/identity.json"))
 
@@ -151,8 +153,22 @@ def save(
     *,
     path: Optional[Path] = None,
 ) -> Path:
-    """Persist ``record`` to disk. Creates the parent directory if
-    missing and chmod 600's the file on POSIX systems.
+    """Persist ``record`` to disk.
+
+    Uses :func:`xtool._safe_io.safe_write_json`, which:
+
+    * Ensures the parent (``~/.xtool``) exists and is chmodded to
+      ``0700``. The v0.2.4 version of this function left the directory
+      at whatever ``mkdir`` produced with the process umask (often
+      ``0755``), which meant any other user on the machine could list
+      the filenames -- not a credential leak, but a correlation signal
+      (``cookies.json exists`` = "this account is actively being
+      cleaned up by xtool").
+    * Writes the file atomically via a ``mkstemp`` + fsync + rename,
+      with ``mode=0o600`` from the first byte. No chmod race.
+    * Refuses to follow an attacker-placed symlink at ``path`` thanks
+      to ``O_NOFOLLOW`` on the tempfile create; the final rename does
+      not traverse symlinks at the destination either.
 
     Returns the path we wrote to. Propagates OSError to the caller
     (the CLI layer handles it with a printed warning) -- we would
@@ -160,21 +176,8 @@ def save(
     with an out-of-date state file.
     """
     p = Path(path) if path is not None else DEFAULT_PATH
-    p.parent.mkdir(parents=True, exist_ok=True)
-    tmp = p.with_suffix(p.suffix + ".tmp")
     data = record.to_dict()
-    with tmp.open("w", encoding="utf-8") as fh:
-        json.dump(data, fh, indent=2, sort_keys=True)
-        fh.write("\n")
-    # chmod before the rename so the final file is never world-readable,
-    # even for the instant between create and chmod. On Windows / FAT
-    # the chmod is a no-op; we ignore failures because the rename is
-    # still worth doing.
-    try:
-        os.chmod(tmp, 0o600)
-    except OSError:
-        pass
-    os.replace(tmp, p)
+    safe_write_json(p, data)
     return p
 
 

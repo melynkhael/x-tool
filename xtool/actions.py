@@ -30,6 +30,14 @@ from typing import Callable, Iterable, Optional
 
 import requests
 
+from ._redact import redact_record, redact_text, redact_user_ids_in_text
+from ._safe_io import (
+    chmod_private_file,
+    ensure_private_dir,
+    is_posix,
+    safe_open_append,
+    safe_write_json,
+)
 from .discovery import FALLBACK_QUERY_IDS, get_query_id
 
 
@@ -117,22 +125,39 @@ class Credentials:
             ) from exc
 
     def to_file(self, path: str | Path) -> bool:
-        """Persist credentials. Returns True if file permissions are 0600."""
+        """Persist credentials atomically with mode 0600.
+
+        Uses :func:`xtool._safe_io.safe_write_json` so the file is
+        created via ``mkstemp`` (mode 0600 from the first byte), fsync'd,
+        and atomically renamed into place with ``O_NOFOLLOW`` semantics.
+        This eliminates the v0.2.4 race where ``write_text`` would write
+        with the process umask (often 0o644) and the follow-up ``chmod``
+        left a millisecond-wide window during which the file was
+        world-readable.
+
+        Symlink safety: the final :func:`os.replace` does not follow a
+        symlink at ``path``. An attacker-placed symlink there is
+        replaced with the real file instead of being used to redirect
+        the write.
+
+        Returns
+        -------
+        bool
+            ``True`` when the resulting file is 0600 (POSIX), ``False``
+            on platforms where POSIX modes are not supported (Windows,
+            some FAT-mounted Termux shared-storage paths). The CLI layer
+            surfaces the ``False`` case with a visible warning.
+        """
         p = Path(path)
-        p.parent.mkdir(parents=True, exist_ok=True)
         payload: dict = {"auth_token": self.auth_token, "ct0": self.ct0}
         if self.twid:
             payload["twid"] = self.twid
-        p.write_text(
-            json.dumps(payload, indent=2),
-            encoding="utf-8",
-        )
-        try:
-            p.chmod(0o600)
-        except OSError:
-            # Some Termux shared-storage paths don't support chmod.
+        safe_write_json(p, payload)
+        # On POSIX we require the final file to be 0600; a False return
+        # value means the platform refused the chmod (Windows, FAT).
+        if not is_posix():
             return False
-        return True
+        return chmod_private_file(p)
 
 
 def _delete_retweet_verify(body: dict) -> bool:
@@ -386,24 +411,32 @@ def whoami(session: requests.Session, timeout: float = 20.0) -> dict:
 
         errors.append(f"{short}: JSON without screen_name: {str(body)[:120]}")
 
-    # All endpoints failed. Extract whatever identity hint we can from
-    # the cookies so the error message is useful.
+    # All endpoints failed. We intentionally do NOT interpolate the
+    # twid cookie's user_id into the error message: in v0.2.4 that hint
+    # looked like "twid cookie suggests user_id=1816... -- your auth
+    # seems present" and shipped a permanent account identifier into
+    # every error log / bug report. v0.2.5 still tells the user whether
+    # a twid cookie was present (so they can distinguish "no cookies"
+    # from "cookies look fine, REST is dead") but the numeric value is
+    # redacted out.
     twid = ""
     for c in session.cookies:
         if c.name == "twid":
             twid = c.value or ""
             break
-    user_id_hint = ""
-    import re as _re
-    m = _re.search(r"u(?:%3D|=)(\d+)", twid)
-    if m:
-        user_id_hint = f"\n  (twid cookie suggests user_id={m.group(1)} -- your auth seems present)"
+    if twid:
+        twid_hint = (
+            "\n  (twid cookie is present; your auth looks valid -- "
+            "likely X has deprecated the REST identity endpoints.)"
+        )
+    else:
+        twid_hint = ""
 
-    raise ActionError(
+    raw_error = (
         "could not verify your identity with X. Tried "
         f"{len(_WHOAMI_ENDPOINTS)} REST endpoints, all failed:\n  "
         + "\n  ".join(errors)
-        + user_id_hint
+        + twid_hint
         + "\n\nLikely causes:\n"
         "  1. Cookies expired -- log back into x.com and rerun 'xtool login'.\n"
         "  2. X deprecated these endpoints -- open an issue at\n"
@@ -411,6 +444,13 @@ def whoami(session: requests.Session, timeout: float = 20.0) -> dict:
         "  3. Network blocks x.com (VPN, firewall, captive portal).\n"
         "\nEscape hatch: pass --skip-whoami to delete/unretweet/unlike\n"
         "to bypass the identity check (you lose --expect-account safety)."
+    )
+    # Defence in depth: an upstream server echoing our cookie or twid
+    # value back in an error body would end up in `errors` above. Run
+    # the aggregate message through the credential redactor, and also
+    # scrub any stray 15+-digit run (a raw user_id) before raising.
+    raise ActionError(
+        redact_user_ids_in_text(redact_text(raw_error))
     )
 
 
@@ -528,7 +568,21 @@ def bulk_action(
     # Track in-memory to dedup within a single run (not just across runs).
     seen_this_run: set[str] = set()
 
-    with log_path.open("a", encoding="utf-8") as log_fh:
+    # safe_open_append opens with O_CREAT | O_APPEND | O_NOFOLLOW and
+    # mode 0600 so the log file is not world-readable even for the
+    # instant between creation and the first flush. The parent dir
+    # (e.g. the cwd, or ~/.xtool/logs/) is NOT forcibly chmodded to
+    # 0700 here because bulk_action's log_path is user-controlled and
+    # often lives in the project directory; we only tighten the
+    # directory when it is under ~/.xtool/. See logs.py for that case.
+    import os as _os
+    ensure_private_parent = str(log_path.parent).startswith(
+        _os.path.expanduser("~/.xtool")
+    )
+
+    with safe_open_append(
+        log_path, ensure_parent_private=ensure_private_parent
+    ) as log_fh:
         for tid in tweet_ids:
             tid = str(tid)
             if tid in seen_this_run:
@@ -566,8 +620,7 @@ def bulk_action(
                     }
                     if detail:
                         rec["error"] = detail
-                    log_fh.write(json.dumps(rec) + "\n")
-                    log_fh.flush()
+                    _write_log_record(log_fh, rec)
                     if on_progress:
                         on_progress(stats, tid, outcome)
                     raise ActionError(
@@ -588,8 +641,7 @@ def bulk_action(
                     rec["response"] = detail
                 else:
                     rec["error"] = detail
-            log_fh.write(json.dumps(rec) + "\n")
-            log_fh.flush()
+            _write_log_record(log_fh, rec)
 
             if on_progress:
                 on_progress(stats, tid, outcome)
@@ -598,6 +650,35 @@ def bulk_action(
                 time.sleep(interval)
 
     return stats
+
+
+def _write_log_record(log_fh, rec: dict) -> None:
+    """Scrub credential material out of ``rec`` and append it as JSONL.
+
+    ``rec`` typically contains one of three kinds of free-form fields
+    we need to be careful about:
+
+    * ``response`` -- a truncated JSON body. For DeleteTweet /
+      DeleteRetweet this includes ``rest_id`` values (numeric user or
+      tweet ids) and sometimes the authenticated ``user_id`` in
+      error branches.
+    * ``error``    -- the last failure message from the X API. Error
+      bodies have been observed to echo back parts of the request
+      headers (including ``Cookie:`` on some edge configs) when the
+      request was malformed.
+    * anything else a future caller might add.
+
+    :func:`xtool._redact.redact_record` walks the dict recursively,
+    replaces credential-shaped keys with placeholder tokens, redacts
+    ``auth_token=`` / ``Bearer …`` / ``Cookie:`` substrings inside
+    any string values, and scrubs ``user_id`` / ``rest_id`` fields.
+    The outcome is a log entry that preserves every id and metric the
+    tool needs for resume / reporting, without any recoverable
+    credential or permanent user identifier.
+    """
+    safe = redact_record(rec)
+    log_fh.write(json.dumps(safe, ensure_ascii=False) + "\n")
+    log_fh.flush()
 
 
 def _action_key(action: Action) -> str:
@@ -634,11 +715,16 @@ def _attempt(
             outcome = action.gone_tense if body.get("already_gone") else action.past_tense
             # Include a truncated response body in 'detail' for successful
             # calls too, so users can verify the mutation actually worked.
+            # Redact the body through _redact.redact_record BEFORE
+            # serialization so user_id / rest_id fields and any stray
+            # cookie/auth headers in the body never reach the log file
+            # in plaintext. See xtool/_redact.py for the scrub rules.
             resp_summary = None
             if body.get("_raw_response"):
                 # Strip the internal marker and produce a compact summary.
                 body.pop("_raw_response", None)
-                resp_summary = json.dumps(body, ensure_ascii=False)[:500]
+                safe_body = redact_record(body)
+                resp_summary = json.dumps(safe_body, ensure_ascii=False)[:500]
             return outcome, resp_summary
         except RateLimited as rl:
             last_error = f"rate limited (reset={rl.reset_epoch:.0f})"
@@ -650,7 +736,9 @@ def _attempt(
             time.sleep(wait)
         except ActionError as exc:
             msg = str(exc)
-            last_error = msg[:500]
+            # Scrub any credential material the server may have echoed
+            # back into the error body before we persist it to the log.
+            last_error = redact_text(msg)[:500]
             # Auth failures: stop trying so we don't hammer with bad
             # cookies. Surface via 'failed' outcome; CLI will abort.
             if "authentication rejected" in msg:

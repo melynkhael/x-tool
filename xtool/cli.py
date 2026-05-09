@@ -34,6 +34,7 @@ from .actions import (
     get_action,
     whoami,
 )
+from ._safe_io import ensure_private_dir
 from .discovery import (
     CACHE_PATH as DISCOVERY_CACHE_PATH,
     discover_with_sources,
@@ -259,6 +260,20 @@ def cmd_resolve_retweets(args: argparse.Namespace) -> int:
             if args.debug_file
             else out_path.with_suffix(out_path.suffix + ".debug.jsonl")
         )
+        # The debug dump contains raw timeline instructions from X's
+        # UserTweets GraphQL response. These have been scrubbed of
+        # credentials and user_id-shaped fields before writing, and
+        # the file itself is created with mode 0600, but the
+        # remaining content (tweet ids, text, entry metadata) is
+        # still privacy-sensitive enough that users should not paste
+        # it into a public issue without review. Make that expectation
+        # obvious the moment we enable --debug.
+        console.print(
+            f"[yellow]note:[/yellow] debug dump will be written to "
+            f"[cyan]{debug_path}[/cyan] with chmod 600. The file may "
+            "contain tweet text and entry metadata; review it before "
+            "sharing in bug reports."
+        )
 
     console.print(
         f"[bold]Walking timeline[/bold] user_id={user_id}  "
@@ -359,6 +374,20 @@ def cmd_discover(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 def _load_credentials(args: argparse.Namespace) -> Credentials | None:
     path = Path(args.cookies_file) if args.cookies_file else COOKIES_PATH
+    # Privacy: passing --auth-token / --ct0 on the command line is a
+    # known leak vector (shell history files, `ps auxf` snapshots,
+    # tmux pane capture, etc.). We cannot undo the leak from here,
+    # but we can make sure the user knows it happened so they can
+    # rotate their X session. The warning is printed once per invocation
+    # and kept short so it is visible even over a long banner.
+    if args.auth_token or args.ct0:
+        console.print(
+            "[yellow]warning:[/yellow] --auth-token and --ct0 on the "
+            "command line are stored in shell history and may appear "
+            "in process listings. Prefer `xtool login` (hidden input, "
+            "saved to [cyan]~/.xtool/cookies.json[/cyan] with chmod 600) "
+            "unless you are sure you understand the risk."
+        )
     try:
         if args.auth_token and args.ct0:
             return Credentials(args.auth_token, args.ct0)
@@ -700,6 +729,31 @@ def cmd_update(args: argparse.Namespace) -> int:
     return run_update()
 
 
+def cmd_doctor(args: argparse.Namespace) -> int:
+    """Local security / privacy self-check.
+
+    Thin wrapper around :func:`xtool.doctor.run_doctor` so the CLI
+    parser stays uncoupled from the check definitions. The separate
+    module also lets the wizard or a future plugin reuse
+    :func:`xtool.doctor.run_checks` without going through argparse.
+
+    The function never prints secret values and never touches the
+    network. With ``--fix`` it will clamp obvious permission issues
+    (``chmod 700`` / ``chmod 600``) but will not rename or delete
+    files.
+    """
+    from .doctor import run_doctor
+    # Make sure the ~/.xtool directory has the correct mode before
+    # doctor inspects it. Doing it here means the doctor output
+    # reflects the state xtool maintains, not a stale state from
+    # before the first write.
+    try:
+        ensure_private_dir(Path(os.path.expanduser("~/.xtool")))
+    except OSError:
+        pass
+    return run_doctor(args)
+
+
 def cmd_whoami(args: argparse.Namespace) -> int:
     """Show the current account identity from saved cookies.
 
@@ -817,6 +871,26 @@ def build_parser() -> argparse.ArgumentParser:
         help="pull latest X-Tool from GitHub and reinstall (beginner-friendly)",
     )
     sp.set_defaults(func=cmd_update)
+
+    # doctor (security / privacy self-check)
+    sp = sub.add_parser(
+        "doctor",
+        help=(
+            "run a local security/privacy self-check on ~/.xtool, the "
+            "current git checkout, and shell history files"
+        ),
+    )
+    sp.add_argument(
+        "--fix",
+        action="store_true",
+        help=(
+            "tighten obvious permission issues (chmod 700 on "
+            "~/.xtool, chmod 600 on cookies.json/identity.json/"
+            "query_ids.json and log files). Never moves or deletes "
+            "files."
+        ),
+    )
+    sp.set_defaults(func=cmd_doctor)
 
     # whoami / account
     for name, helptext in (

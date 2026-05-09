@@ -1344,9 +1344,9 @@ class TestMenuBannerHasAttribution:
 
 
 class TestVersionBumpedToPatch:
-    def test_version_is_024(self):
+    def test_version_is_025(self):
         from xtool import __version__
-        assert __version__ == "0.2.4"
+        assert __version__ == "0.2.5"
 
 
 class TestMenuAccountHeaderStates:
