@@ -942,7 +942,7 @@ class TestMenuPromptWording:
         captured = {}
         monkeypatch.setattr("builtins.input", lambda p: (captured.setdefault("p", p), "0")[1])
         from xtool.ui import ask_choice
-        ask_choice("Choose option (0-9, t)", valid=["0"], default="0", hide_default=True)
+        ask_choice("Choose option", valid=["0"], default="0", hide_default=True)
         assert "[0]" not in captured["p"]
         assert "Choose option" in captured["p"]
 
