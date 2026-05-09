@@ -2,6 +2,46 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.4] - 2026-05-09
+
+### Fixed (privacy / UX)
+- The menu header no longer prints the raw numeric X user ID. The
+  v0.2.3 shape `Account: user id 1816262302209085440 from twid`
+  leaked a permanent account identifier into every screenshot;
+  it is now `Account: twid found, handle not verified` in that
+  state. The user ID is still kept internally for verification, but
+  it is never shown anywhere in default output.
+- The verified menu line is now just `Account: @handle` (green).
+  The word "verified" is dropped -- the colour carries the meaning
+  and the line looks much cleaner in a Termux terminal.
+- `xtool login` and `xtool whoami` no longer print `User ID: …` in
+  their success / twid-only panels by default. The CLI gains a new
+  opt-in flag for power users:
+      xtool whoami --show-user-id
+      xtool account --show-user-id
+  With that flag the numeric user ID is shown; without it, it is not.
+
+### Added
+- New `~/.xtool/identity.json` file (chmod 600) that records the
+  last verified handle, a UTC timestamp, and -- for internal use --
+  the user_id and verification source. **No credentials** are
+  stored here: `auth_token`, `ct0`, and `twid` remain in
+  `cookies.json` only.
+- Plain `xtool` now seeds the expected handle from that file, so
+  after `xtool whoami --expect-handle veldorakite` succeeds the
+  next `xtool` shows `Account: @veldorakite` without re-prompting.
+- New menu state for stale verifications:
+      Account: @veldorakite last verified, recheck failed
+  shown when a previous verification is on file but the current
+  network probe could not reconfirm the handle. Safety warnings
+  for destructive actions still fire in this state.
+
+### Changed
+- `format_identity_line()` and `print_identity_banner()` gained a
+  `show_user_id` flag (default False). The wizard always passes
+  False; only the CLI `--show-user-id` opts in.
+- CHANGELOG / README / banner bumped to v0.2.4.
+
 ## [0.2.3] - 2026-05-09
 
 ### Fixed

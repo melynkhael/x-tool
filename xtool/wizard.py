@@ -71,10 +71,32 @@ def _refresh_identity(*, force: bool = False) -> "auth.Identity | None":
 
     When no cookies exist the cached Identity is a ``status="none"``
     value, not ``None``, so the header always has something to render.
+
+    If ``_state['handle']`` is empty, we also seed it from the
+    persisted identity metadata (``~/.xtool/identity.json``). This is
+    what lets plain ``xtool`` show ``Account: @handle`` after a
+    previous ``xtool whoami --expect-handle`` -- without that seed
+    the menu would fall back to the twid-only partial state.
     """
     cached = _state.get("identity")
     if cached is not None and not force:
         return cached
+
+    # Seed the expected handle from disk before probing, so
+    # verify_from_cookie_file has something to feed back to the
+    # handle-match path when REST is down.
+    if not _state.get("handle"):
+        try:
+            from . import identity_store
+            record = identity_store.load()
+            seeded = record.expected_handle or record.last_verified_handle
+            if seeded:
+                _state["handle"] = seeded
+        except Exception:
+            # identity_store is intentionally best-effort; a corrupt
+            # or missing file must never block the menu from opening.
+            pass
+
     identity = auth.verify_from_cookie_file(
         COOKIES_PATH,
         expect_handle=_state.get("handle"),
@@ -270,6 +292,24 @@ def _menu_login() -> None:
     _state["identity"] = identity
     if identity.handle:
         _state["handle"] = identity.handle
+
+    # Persist safe identity metadata (handle, last_verified_at, etc.)
+    # so the next plain `xtool` invocation can render
+    # "Account: @handle" without having to re-ask or re-probe. We
+    # never write credentials here -- identity_store rejects those
+    # fields by design. See xtool/identity_store.py.
+    try:
+        from . import identity_store
+        if identity.status == "verified" and identity.handle:
+            identity_store.record_verified(
+                handle=identity.handle,
+                user_id=identity.user_id,
+                source=identity.source,
+            )
+        elif expect_clean:
+            identity_store.remember_expected_handle(expect_clean)
+    except OSError as exc:
+        warning(f"Could not save identity metadata: {exc}")
 
     console.print()
     print_identity_banner(identity)

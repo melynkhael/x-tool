@@ -494,8 +494,11 @@ class TestVerifyFromCookieFile:
 class TestIdentityOneLiner:
     def test_verified(self):
         from xtool.auth import Identity
+        # v0.2.4: the verified menu line is just "@handle" -- the
+        # word "verified" was dropped because the green styling in
+        # the UI layer already carries that meaning.
         assert Identity(status="verified", handle="veldorakite").one_liner() \
-            == "@veldorakite verified"
+            == "@veldorakite"
 
     def test_partial_with_handle(self):
         from xtool.auth import Identity
@@ -505,11 +508,15 @@ class TestIdentityOneLiner:
 
     def test_partial_with_user_id_only(self):
         from xtool.auth import Identity
-        # twid-only partial now explicitly surfaces the user_id in
-        # the one-liner so the menu header is informative.
+        # v0.2.4: twid-only partial must NOT surface the raw numeric
+        # id here. The menu header is visible on every prompt and
+        # routinely screenshot'd, so we describe the state
+        # ("twid found, handle not verified") without leaking the
+        # actual user_id.
         line = Identity(status="partial", user_id="123").one_liner()
-        assert "123" in line
+        assert "123" not in line
         assert "twid" in line
+        assert "handle not verified" in line
 
     def test_partial_bare(self):
         from xtool.auth import Identity
@@ -540,13 +547,14 @@ class TestFormatIdentityLine:
     def test_status_verified(self):
         from xtool.auth import Identity
         text = self._rendered(Identity(status="verified", handle="x"))
-        assert text == "Account: @x verified"
+        # v0.2.4: no "verified" word any more -- the colour is enough.
+        assert text == "Account: @x"
 
     def test_status_partial(self):
         from xtool.auth import Identity
         text = self._rendered(Identity(status="partial", handle="x"))
         assert "@x" in text
-        assert "identity not verified" in text
+        assert "not verified" in text
 
 
 # ── confirm_typed: unverified branch ─────────────────────────────────────
@@ -640,8 +648,20 @@ class TestWhoamiCommand:
 # ── Wizard state: identity refresh caches and upgrades ───────────────────
 
 class TestWizardRefreshIdentity:
-    def test_refresh_caches_result(self, monkeypatch):
+    def _isolate_identity_store(self, tmp_path, monkeypatch):
+        """Point ``identity_store.DEFAULT_PATH`` at a tmp file so we
+        don't inherit whatever is sitting in the real
+        ``~/.xtool/identity.json`` from a prior run. Without this,
+        the wizard seeds ``_state['handle']`` from disk before our
+        fake verify runs, which masks the behaviour under test."""
+        from xtool import identity_store
+        monkeypatch.setattr(
+            identity_store, "DEFAULT_PATH", tmp_path / "identity.json"
+        )
+
+    def test_refresh_caches_result(self, monkeypatch, tmp_path):
         from xtool import wizard, auth as _auth
+        self._isolate_identity_store(tmp_path, monkeypatch)
         # Reset state between tests.
         wizard._state["identity"] = None
         wizard._state["handle"] = None
@@ -666,8 +686,9 @@ class TestWizardRefreshIdentity:
         wizard._refresh_identity(force=True)
         assert calls["n"] == 2
 
-    def test_refresh_populates_handle(self, monkeypatch):
+    def test_refresh_populates_handle(self, monkeypatch, tmp_path):
         from xtool import wizard, auth as _auth
+        self._isolate_identity_store(tmp_path, monkeypatch)
         wizard._state["identity"] = None
         wizard._state["handle"] = None
 
@@ -1323,13 +1344,18 @@ class TestMenuBannerHasAttribution:
 
 
 class TestVersionBumpedToPatch:
-    def test_version_is_023(self):
+    def test_version_is_024(self):
         from xtool import __version__
-        assert __version__ == "0.2.3"
+        assert __version__ == "0.2.4"
 
 
 class TestMenuAccountHeaderStates:
-    """format_identity_line() must emit the spec's text for each state."""
+    """format_identity_line() must emit the spec's text for each state.
+
+    v0.2.4 tightens the contract: no numeric user_id ever, no
+    "verified" suffix in the menu. These tests pin those rules so a
+    future regression shows up immediately.
+    """
 
     def _rendered(self, identity):
         from xtool.ui import format_identity_line
@@ -1353,18 +1379,32 @@ class TestMenuAccountHeaderStates:
         text = self._rendered(
             Identity(status="partial", user_id="7777", source="twid")
         )
-        assert "7777" in text
-        assert "twid" in text
-        # Must not be the weaker "cookies saved, identity not verified"
-        # line -- we actually know the user_id here.
-        assert "cookies saved, identity not verified" not in text
+        # v0.2.4 rule: the raw user_id must NEVER appear in the menu.
+        assert "7777" not in text
+        assert text == "Account: twid found, handle not verified"
 
     def test_verified(self):
         from xtool.auth import Identity
         text = self._rendered(
             Identity(status="verified", handle="veldorakite", source="rest")
         )
-        assert text == "Account: @veldorakite verified"
+        # v0.2.4: no "verified" word -- colour carries the signal.
+        assert text == "Account: @veldorakite"
+
+    def test_stale_verified_recheck_failed(self):
+        """A previously-verified handle with a failed recheck should
+        render as "@handle last verified, recheck failed", not fall
+        back to the weaker cookies-only line."""
+        from xtool.auth import Identity
+        text = self._rendered(Identity(
+            status="partial",
+            source="cookie",
+            last_verified_handle="veldorakite",
+            recheck_failed=True,
+        ))
+        assert text == (
+            "Account: @veldorakite last verified, recheck failed"
+        )
 
 
 class TestDestructiveActionNeedsConfirmation:
