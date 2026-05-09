@@ -1,83 +1,147 @@
 # Safety
 
-This is a short guide to using X-Tool safely. Please read it before
-your first real cleanup.
+A short guide to using X-Tool safely. Please read this before your
+first real cleanup.
 
 ---
 
-## The one-sentence summary
+## One-sentence summary
 
-Always **dry-run** first, never share your cookies, and remember that
+Always dry-run first, never share your cookies, and remember that
 deleted tweets cannot be undone.
 
 ---
 
-## Deletion is permanent
+## What cookies are
 
-X does not keep a trash bin for deleted tweets. Once X-Tool (or anyone
-else) deletes a tweet, it is gone.
+X-Tool uses three session cookies from your logged-in X browser
+session:
 
-Before you start:
+- `auth_token` — required. Your logged-in session token.
+- `ct0` — required. A security token X uses for any write action.
+- `twid` — optional but strongly recommended. It holds your internal
+  user ID and helps X-Tool verify the account.
 
-- Make sure you have your X archive saved locally. The archive is
-  your only offline record.
-- If there are tweets you want to keep (a pinned thread, a favourite
-  reply), note down their IDs first and use the `--keep-ids` filter
-  to exclude them.
-- Run a **dry-run** before every real run. A dry-run touches nothing
-  on X and tells you exactly what would be deleted.
-
----
-
-## Your cookies are sensitive
-
-`auth_token`, `ct0`, and `twid` give full access to your X session.
-
-- Treat them like your password.
-- Do **not** share them anywhere public — screenshots, GitHub issues,
-  Discord, Telegram, Reddit, chat logs.
-- Do **not** paste them into random websites or "cookie validators".
-- If you ever leak them, log out of X on all devices right away
-  (Settings → Security and account access → Apps and sessions → Log
-  out of all other sessions). That invalidates the leaked cookies.
-
-X-Tool stores your cookies only in `~/.xtool/cookies.json`, with file
-permissions restricted to your user account (`chmod 600` where the
-filesystem supports it). Nothing is sent to any third party.
+These cookies let X-Tool act on your account the same way your own
+browser does. They do not include your password, but they give the
+same access.
 
 ---
 
-## Account verification states
+## Why they are sensitive
 
-The menu header shows one of four states:
+Anyone who has `auth_token` and `ct0` can act as you on X without a
+password.
 
-| State                                           | What it means                                                                            |
-| ----------------------------------------------- | ---------------------------------------------------------------------------------------- |
-| `Account: not logged in`                        | No cookies saved. Run option 1.                                                          |
-| `Account: cookies saved, identity not verified` | `auth_token` and `ct0` are saved, but X-Tool cannot prove which account they belong to.  |
-| `Account: user id ... from twid`                | `twid` is saved and gives the numeric user ID. Add your @handle to upgrade to verified.  |
-| `Account: @handle verified`                     | Identity confirmed. Safety checks are fully active.                                      |
-
-Only the last state turns on all safety checks. In the other states
-X-Tool still works, but it cannot double-check that the cookies belong
-to the account you think they do. Always use dry-run first.
+Treat them like your password.
 
 ---
 
-## Rate limiting
+## What not to share
 
-X enforces rate limits. X-Tool defaults to one action per second,
-which is safe. Do not raise `--rate` above the built-in safety ceiling
-unless you know what you are doing — the risk is a temporary account
-lock, not faster cleanup.
+Never share or post any of these:
+
+- `auth_token`
+- `ct0`
+- `twid`
+- `cookies.json`
+- `identity.json`
+- `query_ids.json`
+- Your numeric X user ID from `twid`
+
+Do not:
+
+- Paste them in screenshots.
+- Paste them in GitHub issues, Discord, Telegram, or any chat app.
+- Paste them into random "cookie validator" websites.
+- Send them to anyone asking for them in a support thread.
+
+If you ever share them by mistake, log out of X on all devices
+(X Settings → Security and account access → Apps and sessions → Log
+out of all other sessions). That invalidates the old cookies.
+
+---
+
+## Why dry-run matters
+
+Deletion is permanent. X does not keep a trash bin.
+
+A dry-run:
+
+- Tells X-Tool to count what would change.
+- Writes a plan to your logs.
+- Does not contact X for any delete action.
+- Does not change your account.
+
+Only after a dry-run looks correct should you type `yes` for a real
+run.
+
+---
+
+## What xtool doctor checks
+
+Run this anytime:
+
+```
+xtool doctor
+```
+
+It checks:
+
+- That the `~/.xtool/` folder is private.
+- That `cookies.json`, `identity.json`, and `query_ids.json` have
+  safe file permissions.
+- That X-Tool's log files have safe permissions.
+- That your shell history does not appear to contain cookies.
+- That no sensitive files are accidentally tracked by git.
+- That `identity.json` does not contain credential fields.
+
+It never prints the actual secret values, only file names and
+permission status.
+
+If it finds problems you can try:
+
+```
+xtool doctor --fix
+```
+
+This only adjusts file permissions. It never deletes or moves files.
+
+---
+
+## What files are stored in ~/.xtool
+
+- `~/.xtool/cookies.json` — your saved cookies. Sensitive.
+- `~/.xtool/identity.json` — your verified handle metadata. Not
+  supposed to contain credentials.
+- `~/.xtool/query_ids.json` — cached X query IDs. Not sensitive, but
+  kept in the same folder for tidiness.
+- `~/.xtool/logs/` — per-action log files. Sensitive fields are
+  redacted before writing.
+
+All of these live only on your device.
+
+---
+
+## Remove saved cookies
+
+When you are done using X-Tool, or if you want to rotate cookies, you
+can remove them:
+
+```
+rm ~/.xtool/cookies.json
+```
+
+You may also want to log out of X on all devices to make sure the
+old cookies no longer work.
 
 ---
 
 ## Terms of Service
 
 Automating actions on X may violate X's Terms of Service. By using
-X-Tool you take on that risk. Read X's current Terms before running
-mass actions on your account.
+X-Tool you accept that risk. Read X's current Terms before running
+any mass action.
 
 ---
 
@@ -85,15 +149,17 @@ mass actions on your account.
 
 Before a real run:
 
-- [ ] I downloaded my archive from X.
-- [ ] I ran `xtool` and logged in (option 1).
-- [ ] The menu header says `@handle verified` (ideally).
-- [ ] I ran a **dry-run** first and the count looked right.
-- [ ] I understand deletion is permanent.
+- I downloaded my archive from X.
+- I ran `xtool` and chose `1 Login / save cookies`.
+- The menu header shows `Account: @handle`.
+- I ran a dry-run and the count looked correct.
+- I understand deletion is permanent.
 
 After a cleanup:
 
-- [ ] I expected the profile counters to take minutes/hours to catch up.
-- [ ] I ran `xtool` again and the numbers matched.
-- [ ] If I'm done with X-Tool for a while, I can delete my cookies:
-      `rm ~/.xtool/cookies.json`.
+- I know that X profile counters update slowly.
+- I may delete my cookies when I am done:
+
+```
+rm ~/.xtool/cookies.json
+```

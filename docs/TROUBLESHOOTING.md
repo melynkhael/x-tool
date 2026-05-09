@@ -1,216 +1,251 @@
 # Troubleshooting
 
-Most issues fall into one of the buckets below. Find the symptom, try
-the fix, and if nothing works open an issue at
-[https://github.com/melynkhael/x-tool/issues](https://github.com/melynkhael/x-tool/issues)
-(never include your cookies).
+Find your problem below, try the fix, and if you are still stuck,
+open an issue at
+[https://github.com/melynkhael/x-tool/issues](https://github.com/melynkhael/x-tool/issues).
+
+Never include your cookies, tokens, or numeric user ID in an issue.
+
+Always use **dry-run** first before running any real cleanup.
 
 ---
 
-## Login and identity
+## Account status meanings
 
-### The menu says `Account: not logged in`
+The menu header shows one of these states.
 
-You have not saved cookies yet. Choose menu option **1 Login / save
-cookies** and follow
-[docs/FIREFOX_COOKIE_EDITOR.md](FIREFOX_COOKIE_EDITOR.md).
+**Account: not logged in**
+No cookies saved yet. Choose option `1 Login / save cookies`.
 
-### The menu says `Account: cookies saved, identity not verified`
+**Account: cookies saved, identity not verified**
+`auth_token` and `ct0` are saved, but X-Tool cannot confirm the
+account. Paste `twid` and enter your handle in option `1` to fix
+this.
 
-`auth_token` and `ct0` are saved, but X-Tool could not prove which
-account they belong to. This can happen when X's older identity
-endpoints are unavailable.
+**Account: user id ... from twid**
+`twid` is saved and gives the numeric account ID, but the handle is
+not matched yet. Enter your handle in option `1`.
 
-Fix: run option 1 again and **also** paste `twid` and enter your
-`@handle`. With those two extra values X-Tool can verify the account
-through a different path.
+**Account: @handle**
+Your account is verified. Safety checks are fully active.
 
-Your cookies may still work — the tool just turns off the strongest
-safety check. Always use **dry-run** first in this state.
+Only the `@handle` state turns on all safety checks. In the other
+states X-Tool still works, but cannot fully confirm that the cookies
+belong to the account you think. Always use dry-run first.
 
-### The menu says `Account: user id <number> from twid`
+---
 
-X-Tool knows the numeric user ID from your `twid` cookie, but the
-handle has not been confirmed. Run option 1 and enter your `@handle`
-(without the `@`). That should upgrade the status to
-`@handle verified`.
+## Login failed
 
-### The menu says `Account: @handle verified`
-
-All good. Safety checks are fully active.
-
-### `authentication rejected` / cookies expired
-
-X sessions expire. You need fresh cookies.
+Most of the time, your cookies have expired.
 
 1. Log out of x.com in Firefox.
 2. Log back in.
 3. Redo [docs/FIREFOX_COOKIE_EDITOR.md](FIREFOX_COOKIE_EDITOR.md) to
-   copy the new `auth_token`, `ct0`, and `twid`.
-4. Run `xtool`, choose option 1, paste the new values.
+   copy fresh `auth_token`, `ct0`, and `twid`.
+4. Run `xtool` and choose `1 Login / save cookies`.
+5. Paste the new values.
 
 ---
 
-## Running the actions
+## Cookies saved but identity not verified
 
-### `rate limited` errors during a bulk run
+You see this state:
 
-X limits roughly one action per second. If you see `rate limited`:
-
-- Wait 15 minutes.
-- Re-run — the resume feature skips anything already done.
-- Do **not** raise `--rate` above the built-in safety ceiling.
-
-### `query ID stale` / HTTP 422 GRAPHQL_VALIDATION_FAILED
-
-X rotates internal IDs sometimes. Refresh them with:
-
-```bash
-xtool discover --refresh
+```
+Account: cookies saved, identity not verified
 ```
 
-Then re-run the action.
+Fix: run option `1` again. This time also paste `twid` and enter
+your X handle without the `@`.
 
-### Reposts still show on my profile
-
-X caches profile counters aggressively. Wait 5–30 minutes and refresh.
-If reposts persist, re-run **7 Remove reposts** — X-Tool will pick up
-whatever is left.
-
-### `unlike` prints `not_liked`
-
-Normal. It means that specific tweet was already unliked, or the
-author deleted it. X-Tool counts it as a success for idempotency.
+Your cookies may still work. X-Tool just turns off the strongest
+safety check in this state. Always use dry-run first.
 
 ---
 
-## Archive problems
+## twid found but handle not verified
 
-### X-Tool can't find my archive
-
-X-Tool looks for these files under the folder you give it:
+You see a state like this:
 
 ```
-<folder>/data/tweets.js
-<folder>/data/tweet.js
-<folder>/data/like.js
-<folder>/data/likes.js
+Account: user id ... from twid
 ```
 
-Flat layouts (no `data/` subfolder) also work.
+Meaning: X-Tool knows your internal account ID but has not matched
+it to your handle yet.
 
-Fix: extract the archive ZIP, then give the **extracted folder** path
-(not the ZIP). On Termux:
+Fix: choose option `1` and enter your handle without the `@`.
 
-```bash
+---
+
+## Archive not found
+
+X-Tool looks for your archive files inside the folder you give it.
+You need to point it at the **extracted folder**, not the ZIP.
+
+Example:
+
+```
 cp /storage/emulated/0/Download/twitter-archive.zip ~/
 cd ~
 unzip twitter-archive.zip -d x-archive
 ```
 
-Then in the menu enter `~/x-archive` when asked for the path.
+Then in the menu, enter:
 
-### Archive is old / missing recent tweets
+```
+~/x-archive
+```
 
-Your archive is a snapshot from the day X built it. Anything posted
-after that is not in the archive. For the most complete cleanup,
-download a fresh archive before starting.
+If it still fails, check that one of these files exists:
+
+- `x-archive/data/tweets.js`
+- `x-archive/data/tweet.js`
+- `x-archive/data/like.js`
+- `x-archive/data/likes.js`
 
 ---
 
-## Update problems
+## Reposts still visible after running
 
-### `xtool update` says "not installed from a git checkout"
+X caches profile counters. It can take several minutes to update.
 
-You installed X-Tool with `pip install git+https://...` instead of
-cloning the repo. Two options:
+If reposts still show after waiting, run `7 Remove reposts` again.
+X-Tool will skip ones it already removed and process anything new.
 
-Option A — reinstall over the top:
+---
 
-```bash
-pip install --upgrade git+https://github.com/melynkhael/x-tool.git
+## Likes still visible after running
+
+Same reason. Wait 5–30 minutes and refresh.
+
+If some likes are never removed, they may belong to protected or
+deleted accounts. X-Tool counts those as `not_liked`, which is
+normal.
+
+---
+
+## X counter still shows old numbers
+
+X's profile numbers are cached. This can take minutes or even hours
+to update, even when the tweets are already gone.
+
+Check one individual tweet — if it opens as "tweet not found", then
+it really is deleted. The counter will catch up later.
+
+---
+
+## xtool update failed
+
+Use the fallback commands:
+
 ```
-
-Option B — switch to a git clone once (recommended for beginners):
-
-```bash
-git clone https://github.com/melynkhael/x-tool.git ~/x-tool
 cd ~/x-tool
-bash install.sh
 ```
 
-After either option, `xtool update` will work.
+```
+git pull --ff-only --quiet origin main
+```
 
-### `git pull failed: ...`
+```
+bash install.sh --quiet
+```
 
-Scroll up — X-Tool prints the actual git error. Common causes:
+If `git pull` fails, check:
 
-- **Local changes:** you edited files in `~/x-tool`. Either revert
-  them (`git stash` or `git checkout -- .`), or move your edits to a
-  branch first.
-- **Merge conflict:** follow git's instructions to resolve, then
-  re-run `xtool update`.
-- **No network:** fix connectivity and retry.
-
-### `pip install failed: ...`
-
-Scroll up for the actual pip error. On Termux, common causes:
-
-- Missing build tools: `pkg install rust openssl libexpat`.
-- Out of disk space: `df -h ~` to check.
+- You have internet.
+- You are inside the `~/x-tool` folder.
+- You did not edit any files inside the folder.
 
 ---
 
-## Network
+## Permission warning in xtool doctor
 
-### Cannot reach x.com
+If `xtool doctor` shows warnings about file or folder permissions,
+the fix is usually:
 
-Check that:
+```
+xtool doctor --fix
+```
+
+This command only adjusts permissions. It never deletes files and
+never contacts the network.
+
+If it still warns after a fix, your device or storage may not
+support POSIX permissions. This is common on Android shared storage.
+Your cookies still work — but it is safer to keep them under
+`~/.xtool/` on the Termux home folder, not on shared storage.
+
+---
+
+## Rate limited
+
+X limits how often you can act.
+
+- Wait about 15 minutes.
+- Run the same option again. X-Tool will skip the items it already
+  handled.
+- Do not raise the rate manually — you may get your account
+  temporarily locked.
+
+---
+
+## Query ID errors (HTTP 422)
+
+X rotates internal IDs sometimes. Refresh them:
+
+```
+xtool discover --refresh
+```
+
+Then run the cleanup again.
+
+---
+
+## Cannot reach x.com
+
+Check:
 
 - You have network.
-- A VPN is not rewriting x.com (some corporate VPNs do).
-- You are not behind a captive portal — try opening x.com in the
-  browser first.
+- No VPN is blocking x.com.
+- You are not behind a captive portal (try opening x.com in Firefox
+  first).
 
 X-Tool talks only to `x.com`, `twitter.com`, and `api.twitter.com`.
 
 ---
 
-## Termux-specific
+## Termux specific
 
-### `pip: command not found`
+**`pip: command not found`**
 
-```bash
+```
 pkg install python-pip
 ```
 
-### `termux-setup-storage` permission issues
+**Phone sleeps mid-run**
 
-Run `termux-setup-storage` once and allow storage access when
-prompted. After that, `/storage/emulated/0/Download/` is accessible
-from Termux.
-
-### Phone sleeps mid-run
-
-```bash
+```
 termux-wake-lock
 xtool
 ```
 
-Run `termux-wake-unlock` when you're done.
+Run `termux-wake-unlock` when done.
 
 ---
 
 ## Still stuck?
 
-Open an issue at
+Open an issue:
 [https://github.com/melynkhael/x-tool/issues](https://github.com/melynkhael/x-tool/issues)
-and include:
 
-- What you tried (menu option, command, etc.)
-- What happened (exact error text)
-- Your OS / Termux version
-- `xtool --version`
+Include:
 
-**Never** include `auth_token`, `ct0`, or `twid` in an issue. If the
-error message contains them, redact those parts first.
+- What you tried (menu option or command)
+- What happened (the exact error text)
+- Your operating system or Termux version
+- The output of `xtool --version`
+
+Never include `auth_token`, `ct0`, `twid`, numeric user IDs, or any
+of the `cookies.json`, `identity.json`, or `query_ids.json` files.

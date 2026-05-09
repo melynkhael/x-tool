@@ -2,97 +2,120 @@
 X / Twitter Account Cleanup
 by: melynkhael
 
-A beginner-friendly tool that helps you clean up **your own** X (Twitter)
-account. Delete old tweets, remove replies, undo reposts, and clear
-likes — from a simple menu on your phone or computer.
+X-Tool helps you clean your own X / Twitter account from a simple
+terminal menu. It can delete tweets, delete replies, remove reposts,
+and remove likes. It walks you through each step, so you do not need
+to know any commands.
+
+Current version: v0.2.5
 
 ---
 
 ## What this tool does
 
-- Deletes tweets and replies from your account
-- Removes your reposts (retweets)
-- Removes your likes
-- Works from your downloaded X archive, so it can reach tweets the
-  API can no longer list
-- Runs from a single command: `xtool`
-- Shows a menu — you do not need to remember any commands
-- Has a **dry-run** mode so you can preview what will happen before
-  anything is deleted
-- Runs on Android (Termux), Linux, macOS, and WSL
+- Delete tweets
+- Delete replies
+- Remove reposts (retweets)
+- Remove likes
+- Run a guided full cleanup
+- Work on Android with Termux
+- Use dry-run before any real action
 
 ---
 
 ## Safety warning
 
-This tool only works on your **own** account. It uses **your** session
-cookies — it cannot touch anyone else's account.
+- Only use X-Tool on your own account.
+- Deleted tweets cannot be recovered.
+- Never share your `auth_token`, `ct0`, `twid`, `cookies.json`,
+  `identity.json`, or `query_ids.json`.
+- Always run a dry-run first.
+- You use this tool at your own risk.
 
-Please read this before using it:
-
-- Deleted tweets **cannot be recovered**. Always run a **dry-run**
-  first.
-- Never share your `auth_token`, `ct0`, or `twid` cookies with anyone.
-  They give full access to your X session.
-- X's profile counters (tweet count, likes count) are cached and may
-  take minutes or hours to update after a cleanup.
-- Automating actions on X may violate X's Terms of Service. You use
-  this tool at your own risk.
-
-See [docs/SAFETY.md](docs/SAFETY.md) for more.
+Full safety guide: [docs/SAFETY.md](docs/SAFETY.md)
 
 ---
 
 ## What you need
 
-1. A logged-in X account (this is your account — the one you want
-   to clean).
-2. A copy of your X archive (X Settings → Your Account → Download an
-   archive of your data).
-3. Python 3.9 or newer.
-4. About 10 minutes for the first run.
-
-On Android, you'll also need the [Termux](https://f-droid.org/en/packages/com.termux/)
-app (install from F-Droid, **not** the Play Store — the Play Store
-version is out of date).
+- Android with Termux, or Linux / macOS / WSL
+- Python 3.9 or newer
+- Git
+- Your own X account
+- Your X archive (needed if you want to delete tweets, replies, or
+  likes based on archive data)
 
 ---
 
 ## Install on Termux
 
-```bash
+Follow the steps below one by one. Each command is on its own line,
+so it is easy to copy on your phone.
+
+**Step 1 — Update Termux**
+
+```
 pkg update && pkg upgrade -y
+```
+
+**Step 2 — Install requirements**
+
+```
 pkg install python python-pip git -y
-git clone https://github.com/melynkhael/x-tool.git ~/x-tool
+```
+
+**Step 3 — Clone X-Tool**
+
+```
+git clone https://github.com/melynkhael/x-tool ~/x-tool
+```
+
+**Step 4 — Open the folder**
+
+```
 cd ~/x-tool
+```
+
+**Step 5 — Install X-Tool**
+
+```
 bash install.sh
 ```
 
-That's it. Type `xtool` to open the menu.
+**Step 6 — Start X-Tool**
 
-For a longer walkthrough (including how to move your archive onto
-your phone), see [TERMUX_GUIDE.md](TERMUX_GUIDE.md).
+```
+xtool
+```
+
+That is all. The menu will open.
+
+Need more detail for Android? See [TERMUX_GUIDE.md](TERMUX_GUIDE.md).
 
 ---
 
 ## Update X-Tool
 
-The easiest way:
+Use this when you already installed X-Tool before and want the latest
+version.
 
-```bash
+Main command:
+
+```
 xtool update
 ```
 
-This prints just a few short progress lines. Real errors are still
-shown, so you can tell the difference between "all good" and
-"something needs fixing".
+If `xtool update` does not work, use this fallback:
 
-If `xtool update` cannot run (for example, you installed from a pip
-URL instead of a git clone), use:
-
-```bash
+```
 cd ~/x-tool
+```
+
+```
 git pull --ff-only --quiet origin main
+```
+
+```
 bash install.sh --quiet
 ```
 
@@ -100,11 +123,11 @@ bash install.sh --quiet
 
 ## Start the menu
 
-```bash
+```
 xtool
 ```
 
-You'll see something like this:
+You will see something like this:
 
 ```
  X-Tool — X / Twitter Account Cleanup  v0.2.5
@@ -128,28 +151,31 @@ You'll see something like this:
    0  Exit
 ```
 
-Type a number (or letter) and press Enter.
+Type the number or letter, then press Enter.
 
 ---
 
 ## Login / save cookies
 
-Choose option **1** in the menu.
+Follow these steps once:
 
-X-Tool needs three cookies from your browser session:
+1. Run `xtool`.
+2. Choose `1 Login / save cookies`.
+3. Paste `auth_token` when asked.
+4. Paste `ct0` when asked.
+5. Paste `twid` if you have it.
+6. Enter your X handle without `@`.
 
-- `auth_token` — required
-- `ct0` — required
-- `twid` — optional, but **strongly recommended** so X-Tool can
-  verify which account the cookies belong to
+Important:
 
-The easiest way to get them is the **Cookie-Editor** browser extension.
+- `auth_token` and `ct0` are required.
+- `twid` is optional but strongly recommended. It helps X-Tool verify
+  your account.
+- Hidden input is normal. The cookie text will not appear on screen
+  while you paste. That is a safety feature.
 
-See the full step-by-step tutorial:
-**[docs/FIREFOX_COOKIE_EDITOR.md](docs/FIREFOX_COOKIE_EDITOR.md)**
-
-**Never** share these values with anyone. Do not paste them into
-screenshots, GitHub issues, Discord, Telegram, or public chats.
+For the full cookie tutorial, see
+[docs/FIREFOX_COOKIE_EDITOR.md](docs/FIREFOX_COOKIE_EDITOR.md).
 
 ---
 
@@ -160,118 +186,155 @@ Quick version:
 1. Open Firefox.
 2. Install the Cookie-Editor extension from
    [addons.mozilla.org](https://addons.mozilla.org/firefox/addon/cookie-editor/).
-3. Open [https://x.com](https://x.com) and log in to your X account.
-4. Click the Cookie-Editor icon while still on x.com.
+3. Open [https://x.com](https://x.com) and log in.
+4. Open Cookie-Editor while still on x.com.
 5. Find `auth_token` and copy its **value** (not the name).
 6. Find `ct0` and copy its **value**.
-7. Find `twid` and copy its **value** (looks like `u=1234567890`).
-8. Back in Termux, run `xtool` and choose **1 Login / save cookies**.
-9. Paste each value when prompted.
-10. Enter your X handle (without the `@`) when asked.
+7. Find `twid` and copy its **value**.
+8. Go back to Termux and paste them into X-Tool when it asks.
 
-Full tutorial with screenshots and warnings:
+For full screenshots and detailed steps, read
 [docs/FIREFOX_COOKIE_EDITOR.md](docs/FIREFOX_COOKIE_EDITOR.md).
 
 ---
 
 ## How to load your X archive
 
-1. In X: Settings → Your Account → Download an archive of your data.
-2. Wait for the email from X. Download the ZIP to your device.
-3. On Android, copy it to your home folder and unzip it:
-   ```bash
-   cp /storage/emulated/0/Download/twitter-archive.zip ~/
-   cd ~
-   unzip twitter-archive.zip -d x-archive
-   ```
-4. In the menu, choose **2 Load X archive** and enter the folder
-   path (for example: `~/x-archive`).
+Some cleanups (tweets, replies, likes) use your X archive.
 
-X-Tool looks for `data/tweets.js`, `data/tweet.js`, and
-`data/like.js` automatically.
+Steps:
+
+1. Download your X archive from your X account settings.
+2. Move the archive ZIP to your phone storage.
+3. In Termux, copy it to your home folder and unzip it.
+4. Open `xtool`.
+5. Choose `2 Load X archive`.
+6. Enter the folder path when asked.
+
+Need help moving files on Android? See
+[TERMUX_GUIDE.md](TERMUX_GUIDE.md).
 
 ---
 
 ## How to remove reposts
 
-1. Log in (option 1).
-2. Choose **7 Remove reposts**.
-3. Enter your X handle (without the `@`).
-4. X-Tool walks your live profile timeline to find the real source
-   tweet IDs.
-5. Review the count, confirm, and let it run.
-
-Reposts use a special resolver because the archive only contains
-wrapper IDs that will not work for the undo action.
+1. Choose `1` and login.
+2. Choose `7 Remove reposts`.
+3. Enter your X handle without `@`.
+4. Review the dry-run.
+5. Type `yes` only if the result looks correct.
 
 ---
 
 ## How to remove likes
 
-1. Make sure your archive is loaded (option 2).
-2. Choose **8 Remove likes**.
-3. Review the count, dry-run if you want, confirm, and let it run.
+1. Choose `2` and load your X archive.
+2. Choose `8 Remove likes`.
+3. Review the dry-run.
+4. Type `yes` only if the result looks correct.
 
 ---
 
 ## How to delete tweets/replies
 
-1. Load your archive (option 2).
-2. Choose one of:
-   - **4 Delete tweets** — original tweets only
-   - **5 Delete replies** — replies only
-   - **6 Delete tweets and replies**
-3. Dry-run first, then confirm to delete for real.
+Delete tweets:
+
+1. Choose `2` and load your X archive.
+2. Choose `4 Delete tweets`.
+3. Review the dry-run.
+4. Type `yes` only if the result looks correct.
+
+Delete replies:
+
+1. Choose `2` and load your X archive.
+2. Choose `5 Delete replies`.
+3. Review the dry-run.
+4. Type `yes` only if the result looks correct.
 
 ---
 
 ## Full cleanup guided mode
 
-Choose **9 Full cleanup (guided)**.
-
-X-Tool walks you through:
-
-1. Delete tweets
-2. Delete replies
-3. Remove reposts
-4. Remove likes
-
-Each step lets you say yes or no, so you stay in control.
+1. Choose `9 Full cleanup (guided)`.
+2. Follow each step.
+3. Say yes or no for each action.
 
 ---
 
 ## Dry-run vs real run
 
-**Always dry-run first.** A dry-run:
+A dry-run shows what X-Tool would do, without changing your account.
+A real run only happens after you confirm by typing `yes`.
 
-- Counts what would change
-- Writes a log to `~/.xtool/logs/`
-- Does **not** contact X for deletions
-- Does **not** change anything on your account
+Always check the dry-run first.
 
-Only after a dry-run looks correct should you answer `yes` to the
-real run. Deleted tweets cannot be recovered.
+---
+
+## Account status meanings
+
+You will see one of these lines at the top of the menu.
+
+**Account: not logged in**
+No cookies saved. Choose option `1`.
+
+**Account: cookies saved, identity not verified**
+Cookies are saved, but X-Tool cannot confirm the account yet. Add
+`twid` and your handle in option `1`.
+
+**Account: twid found, handle not verified**
+X-Tool found your account's internal ID, but has not matched it to
+your handle yet. Enter your handle in option `1`.
+
+**Account: @handle**
+X-Tool verified your account. All safety checks are on.
+
+---
+
+## Security check
+
+X-Tool has a built-in security check.
+
+Run it with:
+
+```
+xtool doctor
+```
+
+If it says `0 warnings` and `0 critical`, your local X-Tool files
+look safe.
+
+If there are warnings, you can try:
+
+```
+xtool doctor --fix
+```
+
+This fixes local file permissions when possible. It never deletes
+files and never contacts the network.
 
 ---
 
 ## Troubleshooting
 
-Some common states you may see at the top of the menu:
+**Login failed**
+Your cookies may have expired. Log in to x.com again in Firefox,
+copy fresh cookies, and redo option `1`.
 
-- `Account: not logged in` — No cookies saved. Run option 1.
-- `Account: cookies saved, identity not verified` — auth_token and
-  ct0 are saved, but X-Tool cannot prove which account they belong
-  to. Add **twid** and your **handle** in option 1 to improve this.
-- `Account: user id ... from twid` — The `twid` cookie tells us the
-  numeric account ID, but the handle is not confirmed yet. Add your
-  handle in option 1.
-- `Account: @handle verified` — Identity confirmed. Safety checks
-  are fully active.
+**Account not verified**
+Make sure you pasted `twid` and entered your handle. See
+[docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) for details.
 
-If identity is not verified, your cookies may still work, but X-Tool
-cannot prove which account they belong to. **Always use dry-run first.**
+**X profile count still shows old number**
+X caches profile counters. Wait 5–30 minutes, then refresh.
 
-Full list of common problems and fixes:
+**Archive not found**
+Make sure you extracted the ZIP and that a `data` folder exists
+inside. Enter the extracted folder path, not the ZIP.
+
+**xtool update failed**
+Use the fallback commands in the "Update X-Tool" section above.
+
+Full list of problems and fixes:
 [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
 
 ---
@@ -279,35 +342,44 @@ Full list of common problems and fixes:
 ## FAQ
 
 **Is this safe?**
-It runs 100% on your device. Your cookies never leave your machine.
-But deleted tweets are gone forever — always dry-run first.
+It runs only on your device. Your cookies never leave your machine.
+Deleted tweets are gone forever, so always use dry-run first.
+
+**Can deleted tweets be recovered?**
+No. There is no trash bin on X.
 
 **Do I need an API key?**
-No. X-Tool uses the same web session your browser uses (cookies only).
+No. X-Tool uses the same web session your browser uses.
 
-**Why do I need cookies and not a password?**
-X's web client authenticates with session cookies. No password is
-stored or sent by X-Tool.
-
-**My repost count didn't go down.**
-X caches profile counters. Wait 5–30 minutes and refresh.
-
-**Can I undo a deletion?**
-No. That's why dry-run exists.
+**Why do I need cookies?**
+X's web client uses session cookies. No password is stored or sent
+by X-Tool.
 
 **Does it work on Android?**
-Yes, via Termux. See [TERMUX_GUIDE.md](TERMUX_GUIDE.md).
+Yes, through Termux. See [TERMUX_GUIDE.md](TERMUX_GUIDE.md).
 
-More questions and answers: [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
+**Why is the X post count still showing old numbers?**
+X caches profile counters. It can take minutes to hours to catch up.
 
 ---
 
-## Advanced (optional)
+## Advanced usage
 
-For power users, every menu action is also a CLI command. See
-`xtool --help` for the full list (`parse`, `stats`, `filter`,
-`delete`, `unretweet`, `unlike`, `resolve-retweets`, `discover`,
-`whoami`, `update`).
+Advanced users can still use CLI commands directly.
+
+```
+xtool --help
+```
+
+This shows every subcommand (`parse`, `stats`, `filter`, `delete`,
+`unretweet`, `unlike`, `resolve-retweets`, `discover`, `whoami`,
+`update`, `doctor`).
+
+Each subcommand has its own help too:
+
+```
+xtool delete --help
+```
 
 ---
 
