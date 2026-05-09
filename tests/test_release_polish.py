@@ -15,6 +15,7 @@ Covers:
 from __future__ import annotations
 
 import io
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -269,6 +270,234 @@ class TestInstallScriptQuietMode:
         as a structural signal that errors aren't swallowed."""
         text = INSTALL_SH.read_text(encoding="utf-8")
         assert "Rerunning verbosely" in text or "rerunning verbosely" in text.lower()
+
+
+class TestInstallScriptTempFileIsTermuxSafe:
+    """Regression test for the /tmp bug: on Termux, /tmp does not
+    exist, so the old `2>/tmp/xtool-install.err` redirect died with
+    'No such file or directory'. The fix is to honour TMPDIR first,
+    PREFIX/tmp second, then a repo-local ``.tmp`` directory.
+    """
+
+    def test_install_script_does_not_hardcode_slash_tmp(self):
+        """The old install.sh had ``2>/tmp/xtool-install.err`` and a
+        matching ``cat /tmp/xtool-install.err``. Both must be gone."""
+        text = INSTALL_SH.read_text(encoding="utf-8")
+        assert "/tmp/xtool-install" not in text, (
+            "install.sh still contains a hardcoded /tmp path -- this "
+            "will break on Termux where /tmp does not exist."
+        )
+        # And no bare literal `/tmp/` writes -- we don't want anyone
+        # silently reintroducing a hardcode while refactoring.
+        # (The string "/tmp" may appear inside comments explaining the
+        # problem; strip out '#'-prefixed lines before asserting.)
+        non_comment = "\n".join(
+            ln for ln in text.splitlines()
+            if not ln.lstrip().startswith("#")
+        )
+        assert "/tmp/xtool" not in non_comment
+
+    def test_install_script_uses_tmpdir_prefix_fallback(self):
+        """Verify the three-tier resolution (TMPDIR -> PREFIX/tmp ->
+        $here/.tmp) is wired up."""
+        text = INSTALL_SH.read_text(encoding="utf-8")
+        # All three candidate sources must be named in the helper.
+        assert "TMPDIR" in text
+        assert "PREFIX" in text
+        assert ".tmp" in text
+        # And the mktemp call must live under a helper (or inline)
+        # so its location depends on the resolver's output.
+        assert "mktemp" in text
+
+    def test_tmp_dir_helper_picks_tmpdir_when_writable(self, tmp_path):
+        """Drive the real helper function from install.sh in a
+        subshell. This exercises the POSIX + Termux code path end-
+        to-end without requiring Termux itself."""
+        install_sh = INSTALL_SH.read_text(encoding="utf-8")
+        # Extract just the _tmp_dir function so we can source it.
+        m = re.search(
+            r"_tmp_dir\(\)\s*\{.*?\n\}", install_sh, re.DOTALL
+        )
+        assert m, "install.sh is missing the _tmp_dir helper"
+        helper = m.group(0)
+        script = (
+            f'here="{tmp_path}"\n'
+            f'{helper}\n'
+            '_tmp_dir\n'
+        )
+        out = subprocess.run(
+            ["bash", "-c", script],
+            env={
+                "TMPDIR": str(tmp_path / "posix-tmp"),
+                "PREFIX": "",
+                "PATH": os.environ.get("PATH", ""),
+            },
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        # TMPDIR wins.
+        assert out == str(tmp_path / "posix-tmp")
+        # And the directory actually exists now.
+        assert (tmp_path / "posix-tmp").is_dir()
+
+    def test_tmp_dir_helper_falls_back_to_prefix_tmp(self, tmp_path):
+        """When TMPDIR is empty but PREFIX is set (the Termux
+        shape), we must use $PREFIX/tmp."""
+        install_sh = INSTALL_SH.read_text(encoding="utf-8")
+        m = re.search(
+            r"_tmp_dir\(\)\s*\{.*?\n\}", install_sh, re.DOTALL
+        )
+        assert m
+        helper = m.group(0)
+
+        prefix = tmp_path / "fake-termux"
+        prefix.mkdir()
+        script = (
+            f'here="{tmp_path}"\n'
+            f'{helper}\n'
+            '_tmp_dir\n'
+        )
+        out = subprocess.run(
+            ["bash", "-c", script],
+            env={
+                "TMPDIR": "",
+                "PREFIX": str(prefix),
+                "PATH": os.environ.get("PATH", ""),
+            },
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        assert out == str(prefix / "tmp")
+        assert (prefix / "tmp").is_dir()
+
+    def test_tmp_dir_helper_falls_back_to_repo_dot_tmp(self, tmp_path):
+        """When both TMPDIR and PREFIX are unusable the helper must
+        land on $here/.tmp inside the repo checkout."""
+        install_sh = INSTALL_SH.read_text(encoding="utf-8")
+        m = re.search(
+            r"_tmp_dir\(\)\s*\{.*?\n\}", install_sh, re.DOTALL
+        )
+        assert m
+        helper = m.group(0)
+
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        script = (
+            f'here="{repo}"\n'
+            f'{helper}\n'
+            '_tmp_dir\n'
+        )
+        # Point TMPDIR at an unwritable location to force fallback.
+        bad_tmp = tmp_path / "definitely" / "not" / "writable"
+        out = subprocess.run(
+            ["bash", "-c", script],
+            env={
+                "TMPDIR": "/proc/readonly/" + str(bad_tmp),  # unwritable
+                "PREFIX": "",
+                "PATH": os.environ.get("PATH", ""),
+            },
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        assert out == str(repo / ".tmp")
+        assert (repo / ".tmp").is_dir()
+
+    def test_quiet_install_failure_emits_clean_error(self, tmp_path):
+        """End-to-end: copy install.sh into a fake repo with a
+        broken pyproject.toml, run ``bash install.sh --quiet``, and
+        verify the output contains a clean failure message instead
+        of the old 'No such file or directory' noise."""
+        repo = tmp_path / "fake-repo"
+        repo.mkdir()
+        # Broken pyproject so pip install fails; we deliberately
+        # don't include a valid setup.py either.
+        (repo / "pyproject.toml").write_text(
+            "not a valid toml file", encoding="utf-8"
+        )
+        (repo / "install.sh").write_bytes(INSTALL_SH.read_bytes())
+        proc = subprocess.run(
+            ["bash", "install.sh", "--quiet"],
+            cwd=str(repo),
+            capture_output=True,
+            text=True,
+            # Run in a neutral env -- no Termux detection, no
+            # leftover TMPDIR pointing somewhere weird.
+            env={
+                "TMPDIR": "",
+                "PREFIX": "",
+                "PATH": os.environ.get("PATH", ""),
+            },
+        )
+        # Failure must be loud and non-zero.
+        assert proc.returncode != 0, (
+            f"install.sh --quiet should fail on broken pyproject, "
+            f"got rc={proc.returncode}\n"
+            f"stdout: {proc.stdout!r}\n"
+            f"stderr: {proc.stderr!r}"
+        )
+        combined = proc.stdout + proc.stderr
+        # No trace of the old /tmp-missing noise.
+        assert "/tmp/xtool-install.err" not in combined, (
+            "install.sh still references the old hardcoded /tmp path"
+        )
+        assert "No such file or directory" not in combined or (
+            # Rare: pip itself may mention a missing file; allow that
+            # but require it NOT to reference install.sh's own redirect.
+            "xtool-install.err" not in combined
+        )
+        # Success strings must NOT appear on failure.
+        assert "X-Tool v" not in combined or "is ready." not in combined
+        assert "Done." not in combined
+        # But the real failure marker IS shown.
+        assert "Install failed" in combined
+
+    def test_quiet_install_success_leaves_no_stale_err_file(
+        self, tmp_path, monkeypatch
+    ):
+        """On a successful quiet install, the temp error file should
+        be cleaned up (it's the happy path, nothing to preserve)."""
+        repo = tmp_path / "real-repo"
+        # Copy the real repo so pip install actually works.
+        import shutil as _shutil
+        src_repo = REPO_ROOT
+        _shutil.copytree(
+            src_repo,
+            repo,
+            ignore=_shutil.ignore_patterns(
+                ".git", "__pycache__", "*.egg-info",
+                "build", "dist", ".tmp",
+            ),
+        )
+        proc = subprocess.run(
+            ["bash", "install.sh", "--quiet"],
+            cwd=str(repo),
+            capture_output=True,
+            text=True,
+            env={
+                "TMPDIR": str(tmp_path / "my-tmp"),
+                "PREFIX": "",
+                "PATH": os.environ.get("PATH", ""),
+            },
+        )
+        assert proc.returncode == 0, (
+            f"quiet install should succeed on a valid checkout\n"
+            f"stdout: {proc.stdout}\n"
+            f"stderr: {proc.stderr}"
+        )
+        # The TMPDIR we pointed at should exist but contain no
+        # leftover *.err file from a successful run.
+        tmpdir = tmp_path / "my-tmp"
+        if tmpdir.exists():
+            err_files = list(tmpdir.glob("xtool-install*.err"))
+            assert not err_files, (
+                f"stale error files left over after success: {err_files}"
+            )
+        # And the user-visible success markers must all be present.
+        assert "Done." in proc.stdout
+        assert "is ready." in proc.stdout
 
 
 # ── 4. README beginner sections ──────────────────────────────────────────
