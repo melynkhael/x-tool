@@ -38,12 +38,22 @@ xtool --version
 
 ### 1. Get your X cookies
 
-1. Open **Chrome** or **Firefox** on your phone/tablet.
-2. Go to [https://x.com](https://x.com) and log in.
-3. For Chrome on Android:
-   - Type `chrome://inspect` in a new tab (or use a desktop browser with USB debugging).
-   - Alternatively, use a cookie viewer extension.
-4. You need two values: **auth_token** and **ct0**.
+1. Open **Firefox** on your phone or computer.
+2. Install the Cookie-Editor extension from
+   [addons.mozilla.org](https://addons.mozilla.org/firefox/addon/cookie-editor/).
+3. Open [https://x.com](https://x.com) and log in.
+4. Use Cookie-Editor to find and copy `auth_token`, `ct0`, and
+   `twid`.
+
+A full step-by-step walkthrough with warnings is in
+[docs/FIREFOX_COOKIE_EDITOR.md](docs/FIREFOX_COOKIE_EDITOR.md).
+
+You need three values:
+
+- **auth_token** (required)
+- **ct0** (required)
+- **twid** (optional, strongly recommended so X-Tool can verify the
+  account)
 
 ### 2. Save cookies
 
@@ -94,10 +104,18 @@ xtool
 
 ## Updating
 
+The easy way:
+
+```bash
+xtool update
+```
+
+Fallback (if `xtool update` can't run):
+
 ```bash
 cd ~/x-tool
-git pull --ff-only origin main
-bash install.sh
+git pull --ff-only --quiet origin main
+bash install.sh --quiet
 ```
 
 ---

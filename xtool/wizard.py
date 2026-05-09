@@ -88,15 +88,16 @@ def _refresh_identity(*, force: bool = False) -> "auth.Identity | None":
 # ── Main menu ─────────────────────────────────────────────────────────────
 
 MENU_ITEMS = [
-    ("1", "Login / update cookies"),
+    ("1", "Login / save cookies"),
     ("2", "Load X archive"),
     ("3", "Show archive stats"),
-    ("4", "Delete original tweets"),
+    ("4", "Delete tweets"),
     ("5", "Delete replies"),
-    ("6", "Delete originals + replies"),
-    ("7", "Remove reposts / retweets"),
+    ("6", "Delete tweets and replies"),
+    ("7", "Remove reposts"),
     ("8", "Remove likes"),
     ("9", "Full cleanup (guided)"),
+    ("u", "Update X-Tool"),
     ("t", "Troubleshooting"),
     ("0", "Exit"),
 ]
@@ -150,6 +151,8 @@ def run_menu() -> int:
                 _menu_unlike()
             elif choice == "9":
                 _menu_full_cleanup()
+            elif choice == "u":
+                _menu_update()
             elif choice == "t":
                 _menu_troubleshooting()
             elif choice == "0":
@@ -171,19 +174,34 @@ def run_menu() -> int:
 def _menu_login() -> None:
     heading("Login / Update Cookies")
     console.print()
-    console.print("  To use X-Tool you need two cookies from your browser session:")
-    console.print("  [bold]auth_token[/bold] and [bold]ct0[/bold]")
+    console.print("  To use X-Tool you need three cookies from your browser session:")
+    console.print("  [bold]auth_token[/bold], [bold]ct0[/bold], and [bold]twid[/bold].")
+    console.print(
+        "  [dim]auth_token and ct0 are required. twid is optional but "
+        "strongly recommended so X-Tool can verify the account.[/dim]"
+    )
     console.print()
     console.print("  [dim]How to get them:[/dim]")
     console.print("   1. Open [cyan]https://x.com[/cyan] in your browser and log in.")
-    console.print("   2. Open DevTools (F12 or Ctrl+Shift+I).")
+    console.print("   2. Open DevTools (F12 or Ctrl+Shift+I),")
+    console.print("      or install the [bold]Cookie-Editor[/bold] browser extension.")
     console.print("   3. Go to Application > Cookies > https://x.com")
-    console.print("   4. Copy the values of [bold]auth_token[/bold] and [bold]ct0[/bold].")
+    console.print(
+        "   4. Copy the values of [bold]auth_token[/bold], "
+        "[bold]ct0[/bold], and [bold]twid[/bold]."
+    )
+    console.print(
+        "      [dim]See docs/FIREFOX_COOKIE_EDITOR.md for a step-by-step tutorial.[/dim]"
+    )
     console.print()
     console.print(
         "  [dim]Note: the prompts below use hidden input -- nothing will "
         "appear as you paste. That's intentional; the cookie values are "
         "sensitive.[/dim]"
+    )
+    console.print(
+        "  [yellow]Never share auth_token, ct0, or twid with anyone. "
+        "They grant full access to your X session.[/yellow]"
     )
     console.print()
 
@@ -638,18 +656,52 @@ def _menu_full_cleanup() -> None:
 
 # ── Troubleshooting ──────────────────────────────────────────────────────
 
+def _menu_update() -> None:
+    """Update X-Tool in place via the updater module.
+
+    Thin wrapper around :func:`xtool.updater.run_update` so the wizard
+    and the ``xtool update`` CLI command share the exact same code
+    path. Output is routed through Rich so it matches the rest of the
+    menu styling, but we keep it plain text -- no colours, no spinners
+    -- so screenshots stay readable and pastes into GitHub issues do
+    not include ANSI escape codes.
+    """
+    heading("Update X-Tool")
+    console.print()
+    from .updater import run_update
+
+    def _print(line: str = "") -> None:
+        # Indent every line by two spaces to match the rest of the menu.
+        if line:
+            console.print(f"  {line}")
+        else:
+            console.print()
+
+    rc = run_update(printer=_print)
+    console.print()
+    if rc == 0:
+        info("Close and reopen `xtool` to load the new version.")
+    elif rc == 2:
+        info(
+            "If you are stuck, see docs/TROUBLESHOOTING.md or open an "
+            "issue at https://github.com/melynkhael/x-tool/issues"
+        )
+    else:
+        warning("Update failed. Scroll up for the exact error.")
+
+
 def _menu_troubleshooting() -> None:
     heading("Troubleshooting")
     console.print()
 
     issues = [
-        ("Cookies expired", "Log back into x.com, copy fresh auth_token + ct0, run option 1."),
+        ("Cookies expired", "Log back into x.com, copy fresh auth_token + ct0 + twid, run option 1."),
         ("'Rate limited' errors", "X limits ~1 request/sec. Lower --rate or wait 15 min and retry."),
         ("'Query ID stale' errors", "Run: xtool discover --refresh"),
         ("Reposts still showing", "X caches profile data. Wait 5-30 min and check again."),
         ("Archive file missing", "Download from: X Settings > Your Account > Download an archive."),
         ("Network/VPN issues", "Ensure you can reach x.com. Disable VPN if behind a captive portal."),
-        ("Unlike shows 'not_liked'", "Normal — the tweet was already unliked or deleted by its author."),
+        ("Unlike shows 'not_liked'", "Normal -- the tweet was already unliked or deleted by its author."),
         ("Delete cookies", f"Remove: {COOKIES_PATH}"),
     ]
 
@@ -658,6 +710,38 @@ def _menu_troubleshooting() -> None:
         console.print(f"    {fix}")
         console.print()
 
+    # Identity verification states (per v0.2.2 spec).
+    console.print("  [bold cyan]Account verification states[/bold cyan]")
+    console.print(
+        "    [bold]not logged in[/bold] -- no cookies saved yet. "
+        "Run option 1."
+    )
+    console.print(
+        "    [bold]cookies saved, identity not verified[/bold] -- "
+        "auth_token and ct0 are saved but X-Tool cannot prove which "
+        "account they belong to. Add twid and your handle in option 1 "
+        "to improve verification."
+    )
+    console.print(
+        "    [bold]user id ... from twid[/bold] -- the twid cookie "
+        "identifies the account by numeric ID. Add your @handle in "
+        "option 1 to confirm via GraphQL."
+    )
+    console.print(
+        "    [bold]@handle verified[/bold] -- identity confirmed. "
+        "Safety checks are fully active."
+    )
+    console.print(
+        "    [dim]If identity is not verified, your cookies may still "
+        "work, but X-Tool cannot prove which account they belong to. "
+        "Always use dry-run first.[/dim]"
+    )
+    console.print()
+
+    console.print(
+        "  [dim]More help: docs/TROUBLESHOOTING.md and "
+        "docs/FIREFOX_COOKIE_EDITOR.md[/dim]"
+    )
     console.print(
         "  [dim]For other issues: "
         "https://github.com/melynkhael/x-tool/issues[/dim]"
