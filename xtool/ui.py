@@ -38,12 +38,18 @@ def _version() -> str:
 # ── Banner ────────────────────────────────────────────────────────────────
 
 def print_banner() -> None:
-    """Print the app header banner."""
+    """Print the app header banner.
+
+    Includes a small attribution line under the subtitle so users who
+    discover xtool from a fork or a screenshot can tell who maintains
+    it. Kept dim / short so it doesn't compete with the title.
+    """
     title = Text(f" {APP_TITLE} ", style="bold white on blue")
     subtitle = Text(f" {APP_SUBTITLE}  {_version()} ", style="dim")
+    author = Text(" by: melynkhael ", style="dim")
     console.print()
     console.print(Panel(
-        Text.assemble(title, "\n", subtitle),
+        Text.assemble(title, "\n", subtitle, "\n", author),
         box=box.ROUNDED,
         border_style="blue",
         expand=False,
@@ -60,9 +66,10 @@ def format_identity_line(identity: "Identity | None") -> Text:
     Panel or print it inline without losing styling.
 
     The text is colour-coded:
-        verified  -> green
-        partial   -> yellow ("cookies saved, identity not verified")
-        none      -> dim    ("not logged in")
+        verified                   -> green
+        partial w/ handle or twid  -> yellow (still useful information)
+        partial w/ cookies only    -> yellow ("identity not verified")
+        none                       -> dim ("not logged in")
     """
     t = Text()
     t.append("Account: ", style="bold")
@@ -73,15 +80,15 @@ def format_identity_line(identity: "Identity | None") -> Text:
         t.append(f"@{identity.handle}", style="bold green")
         t.append(" verified", style="green")
         return t
-    # partial, or verified-without-handle.
+    # partial branches
     if identity.handle:
         t.append(f"@{identity.handle}", style="bold yellow")
         t.append(" (identity not verified)", style="yellow")
     elif identity.user_id:
-        t.append(
-            f"user_id {identity.user_id}, identity not verified",
-            style="yellow",
-        )
+        # Spec: menu header when only the twid is known should read
+        # "Account: user id <id> from twid" -- show the user_id
+        # explicitly so the user knows we *do* have something concrete.
+        t.append(f"user id {identity.user_id} from twid", style="yellow")
     else:
         t.append("cookies saved, identity not verified", style="yellow")
     return t
@@ -97,12 +104,30 @@ def print_identity_status(identity: "Identity | None") -> None:
 
 def print_identity_banner(identity: "Identity | None") -> None:
     """Post-login welcome / status banner. Multi-line, visually distinct
-    from the menu-header one-liner."""
+    from the menu-header one-liner.
+
+    Four shapes, one per identity state the tool can reach:
+
+    * no cookies saved            -> red "Not logged in." panel
+    * auth_token + ct0 only       -> yellow "Cookies saved, but X
+                                     identity verification failed"
+                                     panel. Mentions that account
+                                     safety checks are disabled and
+                                     recommends dry-run first.
+    * twid known, handle unknown  -> yellow "Cookies saved. User ID
+                                     from twid: N. Handle not
+                                     verified." panel. Suggests
+                                     ``--expect-handle`` to upgrade.
+    * verified                    -> green welcome panel with handle,
+                                     user id, source, and cookies
+                                     path.
+    """
     from pathlib import Path
     import os
 
     cookies_path = Path(os.path.expanduser("~/.xtool/cookies.json"))
 
+    # --- none ---------------------------------------------------------
     if identity is None or identity.status == "none":
         panel = Panel(
             Text.assemble(
@@ -117,14 +142,24 @@ def print_identity_banner(identity: "Identity | None") -> None:
         console.print(panel)
         return
 
+    # --- verified -----------------------------------------------------
     if identity.status == "verified":
         body = Text()
         handle = identity.handle or "(unknown)"
         body.append(f"Logged in as @{handle}\n", style="bold green")
         if identity.user_id:
             body.append(f"User ID: {identity.user_id}\n", style="green")
-        body.append(f"Cookies saved to {cookies_path}\n", style="dim")
-        body.append(f"Source: {identity.source}", style="dim")
+        # Describe how we verified, so users understand whether we
+        # went through REST, matched a handle via GraphQL, or relied
+        # on a twid cookie match.
+        source_descriptions = {
+            "rest": "X REST whoami",
+            "handle-match": "handle matched via GraphQL",
+            "twid": "twid cookie",
+        }
+        source_human = source_descriptions.get(identity.source, identity.source)
+        body.append(f"Verification: {source_human}\n", style="dim")
+        body.append(f"Cookies saved to {cookies_path}", style="dim")
         panel = Panel(
             body,
             border_style="green",
@@ -135,17 +170,32 @@ def print_identity_banner(identity: "Identity | None") -> None:
         console.print(panel)
         return
 
-    # partial
+    # --- partial ------------------------------------------------------
     body = Text()
-    body.append("Cookies were saved, but X identity verification failed.\n",
-                style="bold yellow")
     if identity.user_id:
-        body.append(f"twid user_id: {identity.user_id}\n", style="yellow")
-    body.append(
-        "You may still be able to run actions, but account safety checks are disabled.\n",
-        style="yellow",
-    )
-    body.append("Use dry-run first.", style="dim")
+        # Spec: twid-only partial should tell the user what we know and
+        # nudge them toward --expect-handle so they can unlock
+        # verified.
+        body.append("Cookies saved.\n", style="bold yellow")
+        body.append(
+            f"User ID from twid: {identity.user_id}\n", style="yellow"
+        )
+        body.append("Handle not verified.\n", style="yellow")
+        body.append(
+            "Use --expect-handle to verify this cookie belongs to a "
+            "specific account.",
+            style="dim",
+        )
+    else:
+        body.append(
+            "Cookies saved, but X identity verification failed.\n",
+            style="bold yellow",
+        )
+        body.append(
+            "Account safety checks are disabled.\n",
+            style="yellow",
+        )
+        body.append("Use dry-run first.", style="dim")
     if identity.detail:
         body.append(f"\n\n{identity.detail}", style="dim")
     panel = Panel(
@@ -276,6 +326,50 @@ def ask_secret(
         return "", f"too short ({len(value)} chars; expected at least {min_length})"
 
     # Safe confirmation -- character count only, never the value.
+    console.print(f"  [green]{label} captured:[/green] {len(value)} chars")
+    return value, None
+
+
+def ask_secret_optional(
+    label: str,
+    *,
+    min_length: int = 3,
+) -> tuple[Optional[str], Optional[str]]:
+    """Variant of :func:`ask_secret` for optional secrets.
+
+    Users can press Enter without typing anything to skip. The prompt
+    makes the "optional, press Enter to skip" contract obvious, and
+    skipping is confirmed with a visible ``"<label> skipped"`` line so
+    the user doesn't wonder whether their empty input was eaten.
+
+    Returns ``(value, error)``:
+      * ``(None, None)`` when the user skipped (empty / whitespace
+        input). Callers treat this as "no value provided".
+      * ``(value, None)`` when a usable value was entered. Safe
+        confirmation is printed (length only, never the value).
+      * ``("", error)`` when a non-empty value was entered but looked
+        too short to be real. Callers should refuse to save.
+    """
+    import getpass
+
+    try:
+        raw = getpass.getpass(
+            f"  {label} (optional, paste if available, press Enter to skip): "
+        )
+    except (EOFError, KeyboardInterrupt):
+        console.print("\n[yellow]cancelled[/yellow]")
+        return None, "cancelled"
+
+    # Whitespace-only is treated as skip, not error: it's almost always
+    # an accidental space from a one-handed phone paste.
+    if not raw or not raw.strip():
+        console.print(f"  [dim]{label} skipped[/dim]")
+        return None, None
+
+    value = raw.strip()
+    if len(value) < min_length:
+        return "", f"too short ({len(value)} chars; expected at least {min_length})"
+
     console.print(f"  [green]{label} captured:[/green] {len(value)} chars")
     return value, None
 

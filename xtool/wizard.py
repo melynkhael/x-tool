@@ -201,10 +201,26 @@ def _menu_login() -> None:
         warning("Please paste the cookie value again.")
         return
 
+    # Optional third cookie. When present, xtool can verify identity
+    # entirely via the twid user_id + GraphQL even when X's REST
+    # surfaces are 404ing. Use a short min_length so we accept the
+    # raw numeric form ("1234567890" is 10 chars) as well as "u=<id>"
+    # (12+ chars). Treating blank input as "skip this" keeps the flow
+    # frictionless for users who don't need / can't find twid.
+    from .ui import ask_secret_optional  # local import to keep top clean
+    twid_value, twid_err = ask_secret_optional("twid", min_length=3)
+    if twid_err:
+        # Non-empty but unusable -- tell the user and bail instead of
+        # silently ignoring. The login flow should never persist a
+        # value it thinks is garbage.
+        error(f"twid is {twid_err}. Cookies were not saved.")
+        warning("Paste a valid twid value, or press Enter to skip.")
+        return
+
     from .actions import Credentials
 
     try:
-        creds = Credentials(auth_token=auth_token, ct0=ct0)
+        creds = Credentials(auth_token=auth_token, ct0=ct0, twid=twid_value)
     except ValueError as exc:
         error(str(exc))
         warning("Cookies were not saved. Please paste the cookie values again.")

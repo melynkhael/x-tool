@@ -61,6 +61,12 @@ class RateLimited(Exception):
 class Credentials:
     auth_token: str
     ct0: str
+    # Optional raw twid cookie value, e.g. "u=1234567890" or the
+    # url-encoded "u%3D1234567890". Carried separately from auth_token
+    # / ct0 so callers that never needed identity verification still
+    # work untouched; callers that do need it can inject the cookie
+    # into the session jar via build_session().
+    twid: Optional[str] = None
 
     def __post_init__(self) -> None:
         # Validate shape early so bulk runs don't fail mid-flight.
@@ -78,6 +84,11 @@ class Credentials:
                 "you copied the full cookie values",
                 stacklevel=2,
             )
+        # Normalize twid to None when blank so downstream code can do a
+        # simple `if creds.twid:` check without caring about whitespace.
+        if self.twid is not None:
+            twid = str(self.twid).strip()
+            self.twid = twid or None
 
     @classmethod
     def from_file(cls, path: str | Path) -> "Credentials":
@@ -93,7 +104,12 @@ class Credentials:
                 f"{path}: expected a JSON object with auth_token and ct0"
             )
         try:
-            return cls(auth_token=data["auth_token"], ct0=data["ct0"])
+            return cls(
+                auth_token=data["auth_token"],
+                ct0=data["ct0"],
+                # twid is optional: older cookies files don't have it.
+                twid=data.get("twid"),
+            )
         except KeyError as exc:
             raise ValueError(
                 f"{path}: missing required key {exc.args[0]!r} "
@@ -104,8 +120,11 @@ class Credentials:
         """Persist credentials. Returns True if file permissions are 0600."""
         p = Path(path)
         p.parent.mkdir(parents=True, exist_ok=True)
+        payload: dict = {"auth_token": self.auth_token, "ct0": self.ct0}
+        if self.twid:
+            payload["twid"] = self.twid
         p.write_text(
-            json.dumps({"auth_token": self.auth_token, "ct0": self.ct0}, indent=2),
+            json.dumps(payload, indent=2),
             encoding="utf-8",
         )
         try:
@@ -249,6 +268,15 @@ def build_session(creds: Credentials) -> requests.Session:
     # request x.com only the .x.com copies do.
     s.cookies.set("auth_token", creds.auth_token, domain=".twitter.com", path="/")
     s.cookies.set("ct0", creds.ct0, domain=".twitter.com", path="/")
+    # Optional twid cookie. When present, xtool.auth.verify_identity can
+    # extract the numeric user_id from it and (if a handle is also
+    # provided) confirm the two match via GraphQL -- which is the
+    # identity path that still works after X deprecated the 1.1 REST
+    # endpoints. Stored verbatim; extract_twid_user_id() tolerates
+    # "u=1234", "u%3D1234", quoted variants, and raw numeric strings.
+    if creds.twid:
+        s.cookies.set("twid", creds.twid, domain=".x.com", path="/")
+        s.cookies.set("twid", creds.twid, domain=".twitter.com", path="/")
     return s
 
 
