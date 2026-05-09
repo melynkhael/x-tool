@@ -260,7 +260,7 @@ actions still require the typed `yes` confirmation and dry-run flow.
 - Full cleanup guided workflow (delete + unretweet + unlike in one flow).
 - Troubleshooting menu with common issues and fixes.
 - Professional README with badges, FAQ, and quick-start guide.
-- CONTRIBUTING.md, SECURITY.md, LICENSE files.
+- SECURITY.md, LICENSE files.
 - New modules: `ui.py`, `safety.py`, `logs.py`, `wizard.py`.
 - Tests for wizard/menu integration.
 

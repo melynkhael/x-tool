@@ -385,5 +385,7 @@ xtool delete --help
 
 ## License
 
-[MIT](LICENSE). See also [SECURITY.md](SECURITY.md) and
-[CONTRIBUTING.md](CONTRIBUTING.md).
+[MIT](LICENSE). See also [SECURITY.md](SECURITY.md).
+
+This project is maintained privately by melynkhael. Public contributions are
+not currently accepted.
