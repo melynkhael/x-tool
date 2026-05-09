@@ -2,6 +2,44 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.5] - 2026-05-09 (docs)
+
+Documentation-only polish on top of the v0.2.5 security/privacy
+release. No code changes. No behaviour changes. All CLI commands,
+menu options, and security protections from v0.2.5 still work the
+same way.
+
+### Changed
+
+- README rewritten to be shorter and more beginner-friendly,
+  especially on mobile. Uses short sections, one command per block,
+  and step numbers. No tables. Long tutorials moved to `docs/`.
+- Termux install steps are now broken into six single-command
+  steps in the README, so each block is easy to copy on a phone.
+- `docs/FIREFOX_COOKIE_EDITOR.md` rewritten with a simpler
+  step-by-step structure and a clearer safety warning up front.
+  Every step is its own heading.
+- `docs/TROUBLESHOOTING.md` reorganised into named short sections
+  (login failed, cookies saved but identity not verified, archive
+  not found, `xtool update` failed, permission warning in doctor,
+  etc.). Each answer is one to three short lines.
+- `docs/SAFETY.md` simplified: what cookies are, why they are
+  sensitive, what not to share, why dry-run matters, what
+  `xtool doctor` checks, which files live in `~/.xtool`, and how
+  to remove saved cookies.
+- `TERMUX_GUIDE.md` rewritten with the same step-by-step voice as
+  the README, single-command blocks, and no tables.
+- Menu example in the README matches the actual v0.2.5 menu
+  labels.
+- Docs no longer show raw numeric user IDs in normal examples.
+
+### Not changed
+
+- No changes to `xtool/` source code.
+- No changes to tests.
+- No changes to version numbers; this is still v0.2.5.
+- No weakening of the privacy or security posture.
+
 ## [0.2.5] - 2026-05-09
 
 ### Security / privacy audit

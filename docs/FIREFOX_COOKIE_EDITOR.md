@@ -1,57 +1,54 @@
-# Finding auth_token, ct0, and twid in Firefox with Cookie-Editor
+# Finding auth_token, ct0, and twid in Firefox
 
-This guide is written for non-technical users. If you can install a
-browser extension and copy-paste text, you can finish this in about
-five minutes.
-
-You do this **once**. After that, X-Tool remembers your cookies.
+This is a beginner guide. You only need to do this once. It takes
+about five minutes.
 
 ---
 
-## Before you start
+## What you will need
 
-You will need:
+- Firefox on your phone or computer
+- Your X (Twitter) account
+- Termux (or any terminal) with X-Tool installed
 
-- Firefox installed on a phone or computer
-- An X (Twitter) account you are already logged in to
-- Termux (or a terminal) open with `xtool` installed
-
-If X-Tool is not installed yet, go back to the README first.
+If X-Tool is not installed yet, start with the [README](../README.md)
+first.
 
 ---
 
 ## Why three cookies?
 
-X-Tool needs three values to act on your account:
+X-Tool needs three values from your logged-in browser session:
 
-- **auth_token** — required. This is your logged-in session token.
-- **ct0** — required. This is an anti-forgery token X uses for writes.
-- **twid** — optional but strongly recommended. It holds your numeric
-  user ID and lets X-Tool confirm that the cookies belong to your
-  account.
+- `auth_token` — **required**. Your logged-in session token.
+- `ct0` — **required**. A security token used for any write action.
+- `twid` — **optional** but strongly **recommended**. It holds your
+  internal user ID and lets X-Tool verify the account.
 
 `auth_token` and `ct0` are enough to make X-Tool work. Adding `twid`
-(and your @handle) lets X-Tool show **`Account: @yourhandle verified`**
-in the menu, which turns on the full safety checks.
+(and your @handle) lets X-Tool show `Account: @yourhandle` in the
+menu, which turns on the full safety checks.
 
 ---
 
-## Safety warning (read this)
+## Safety first
 
-Your cookies are the same thing as your password — someone who has
-them can log in as you without knowing your password.
+Your cookies are as sensitive as your password. Anyone who has them
+can act as you on X.
 
-- **Never** share `auth_token`, `ct0`, or `twid` with anyone.
-- Do **not** paste them into screenshots.
-- Do **not** paste them into GitHub issues, Discord, Telegram, or any
-  chat app.
-- Do **not** paste them into online "cookie validators".
-- If you are asked for them in a support thread, refuse — X-Tool will
-  never need them in a public place.
+**Never share** `auth_token`, `ct0`, or `twid`.
 
-If you ever accidentally share them, log out of X on all devices
-(Settings → Security and account access → Apps and sessions → Log
-out of all other sessions). That invalidates the old cookies.
+Never paste them into:
+
+- screenshots
+- github issues
+- discord chats
+- telegram chats
+- reddit threads
+- "online cookie checker" websites
+
+If you ever share them by mistake, log out of X on all devices right
+away. That invalidates the old cookies.
 
 ---
 
@@ -59,41 +56,44 @@ out of all other sessions). That invalidates the old cookies.
 
 ### 1. Open Firefox
 
-Open your Firefox browser. On Android, use **Firefox**, not the
-built-in browser. On desktop, regular Firefox is fine.
+If you do not have Firefox, install it. On Android, use the real
+Firefox app from the official store.
 
 ### 2. Install the Cookie-Editor extension
 
-Go to the official Firefox add-ons page and install Cookie-Editor:
+Open this link in Firefox:
 
-- [https://addons.mozilla.org/firefox/addon/cookie-editor/](https://addons.mozilla.org/firefox/addon/cookie-editor/)
+[https://addons.mozilla.org/firefox/addon/cookie-editor/](https://addons.mozilla.org/firefox/addon/cookie-editor/)
 
-Click **Add to Firefox**, then **Add** when prompted.
+Tap or click **Add to Firefox**, then confirm.
 
-Only install from this link (or from the Firefox Add-ons store). Do
-not install a "Cookie-Editor" extension from any other source.
+Only install from this link. Do not use unknown "cookie editor"
+copies.
 
-### 3. Open x.com and log in
+### 3. Open x.com
 
-Open [https://x.com](https://x.com) in Firefox and sign in to the
-account you want X-Tool to clean.
+Open a new tab and go to:
 
-Make sure you are signed in to the **correct** account. If you have
-several X accounts, check the profile icon in the top right.
+```
+https://x.com
+```
 
-### 4. Open Cookie-Editor while on x.com
+### 4. Log in to your X account
 
-Stay on the x.com tab. Click the Cookie-Editor icon (it looks like a
-small cookie). On Android Firefox, tap the menu (three dots) →
-**Extensions** → **Cookie-Editor**.
+Sign in to the account you want X-Tool to clean. If you use more
+than one account, check that you are on the correct one.
 
-Cookie-Editor will show a list of all cookies for the current site.
-At the top of the list you should see something like:
-`Cookies for .x.com`. If it says something else, you are not on the
-x.com tab — close Cookie-Editor, switch to the x.com tab, and open
-Cookie-Editor again.
+### 5. Open Cookie-Editor while still on x.com
 
-### 5. Find and copy `auth_token`
+Stay on the x.com tab.
+
+- On desktop: click the small cookie icon in the Firefox toolbar.
+- On Android: tap the menu (three dots), then Extensions, then
+  Cookie-Editor.
+
+You should see cookies for `.x.com` at the top of the list.
+
+### 6. Find auth_token
 
 In the Cookie-Editor search box, type:
 
@@ -101,155 +101,127 @@ In the Cookie-Editor search box, type:
 auth_token
 ```
 
-One cookie should appear. Click it to expand it. Copy **only the
-value**, not the name.
+Tap or click the result.
 
-The value is a long hex string, for example:
+Copy the **value**, not the name.
 
-```
-1a2b3c4d5e6f...
-```
+Tip: use Cookie-Editor's copy icon. It avoids copying extra spaces.
 
-It is usually 40 characters long.
+### 7. Copy auth_token's value (not its name)
 
-Tip: Cookie-Editor shows a small "copy" icon next to the value. Use
-that — you will avoid selecting extra spaces by accident.
+Make sure you copy the long string of letters and numbers under
+"Value", not the word `auth_token` itself.
 
-### 6. Find and copy `ct0`
+### 8. Find ct0
 
-Clear the search and type:
+Clear the search. Type:
 
 ```
 ct0
 ```
 
-Click the cookie, copy **only the value**. `ct0` is usually 32–160
-characters long.
+Tap or click the result.
 
-### 7. Find and copy `twid`
+### 9. Copy ct0's value (not its name)
 
-Clear the search and type:
+Copy the **value** only.
+
+### 10. Find twid
+
+Clear the search. Type:
 
 ```
 twid
 ```
 
-Click the cookie, copy the value. It looks like this:
+Tap or click the result.
+
+### 11. Copy twid's value (not its name)
+
+Copy the value. It looks like `u=...`. That is normal.
+
+If you cannot find `twid`, you can skip it. X-Tool still works, but
+identity verification will be weaker.
+
+### 12. Switch back to Termux
+
+Open Termux (or your terminal).
+
+### 13. Run X-Tool and choose login
 
 ```
-u=1234567890
-```
-
-The number after `u=` is your numeric X user ID.
-
-It is fine to copy the whole `u=1234567890` form. X-Tool also accepts
-just the number.
-
-If you cannot find `twid`, you can skip it — X-Tool still works
-without it, you just won't get the fully verified account banner.
-
-### 8. Return to Termux (or your terminal)
-
-Switch back to Termux (or whichever terminal you use) and bring up
-X-Tool.
-
-### 9. Run X-Tool
-
-```bash
 xtool
 ```
 
-### 10. Choose option `1 Login / save cookies`
-
-Press `1` and Enter.
-
-### 11. Paste `auth_token` when asked
-
-At the `auth_token` prompt, paste the value you copied in step 5.
-You will not see anything as you paste — the prompt is intentionally
-hidden for safety. Press Enter after pasting.
-
-X-Tool prints back something like `auth_token captured: 40 chars`.
-If the length looks wrong (for example, 3 chars), you probably only
-copied part of the value — try again.
-
-### 12. Paste `ct0` when asked
-
-Same thing: paste the value from step 6, press Enter.
-
-### 13. Paste `twid` when asked
-
-Paste the value from step 7 and press Enter. If you could not find
-`twid`, just press Enter to skip it.
-
-### 14. Enter your X handle (without `@`)
-
-When asked for your handle, type it without the `@`. For example,
-if your handle is `@jane_doe`, type:
+Then choose:
 
 ```
-jane_doe
+1 Login / save cookies
 ```
 
-This is optional but recommended — it lets X-Tool check that the
-cookies really belong to this handle.
+### 14. Paste each cookie when asked
+
+1. Paste `auth_token` and press Enter.
+2. Paste `ct0` and press Enter.
+3. Paste `twid` and press Enter (or just press Enter to skip).
+4. Enter your X handle without the `@`.
 
 ### 15. Done
 
-X-Tool prints `Verifying session with X...` and then shows your
-account status in the menu header.
+X-Tool will check your session with X and show the account state at
+the top of the menu. If everything worked, you will see:
 
-You should see one of:
+```
+Account: @yourhandle
+```
 
-- `Account: @yourhandle verified` — perfect, safety checks fully on
-- `Account: user id ... from twid` — cookies work, you have the twid;
-  add your handle to upgrade to verified
-- `Account: cookies saved, identity not verified` — cookies work but
-  X-Tool could not confirm the account. Try adding `twid` and your
-  handle.
+That means your cookies are saved and your account is verified.
 
 ---
 
-## What if I pasted the wrong value?
+## Why the screen looks empty while you paste
 
-Just run option 1 again. The new cookies overwrite the old ones.
+Hidden input is normal. The cookie values will not appear on screen
+as you paste. This is a safety feature so nobody looking over your
+shoulder can read them.
 
----
+X-Tool will print a short confirmation after each paste, like:
 
-## What if my cookies stop working later?
+```
+auth_token captured: 40 chars
+```
 
-Cookies expire when you log out of X, change your password, or after
-a long time.
-
-If X-Tool starts saying things like `authentication rejected` or
-`cookies expired`:
-
-1. Open Firefox.
-2. Go to x.com and log in again (even if you look logged in, log out
-   and back in to force a new session).
-3. Redo this tutorial from step 4 to get fresh `auth_token`, `ct0`,
-   and `twid` values.
-4. Run `xtool`, choose option 1, and paste the new values.
+If the number of characters looks too small (for example, `3 chars`),
+you probably only copied part of the value. Try again.
 
 ---
 
-## Clean up when you're done
+## What if cookies stop working later?
 
-If you finish cleaning and will not use X-Tool again for a while,
+Cookies expire when you log out, change your password, or after a
+long time.
+
+If X-Tool starts saying `authentication rejected` or `cookies
+expired`, repeat this guide with fresh values.
+
+---
+
+## Remove saved cookies when you are done
+
+If you finish cleaning and will not use X-Tool for a while, you can
 delete your saved cookies:
 
-```bash
+```
 rm ~/.xtool/cookies.json
 ```
 
-You can also log out of X on all devices to invalidate the cookies,
-as described in the Safety warning above.
+You can also log out of X on all devices to invalidate them.
 
 ---
 
 ## Where to get help
 
-- Troubleshooting: [docs/TROUBLESHOOTING.md](TROUBLESHOOTING.md)
-- Safety notes: [docs/SAFETY.md](SAFETY.md)
-- Bug reports: [https://github.com/melynkhael/x-tool/issues](https://github.com/melynkhael/x-tool/issues)
-  (never include your cookies in an issue)
+- [docs/TROUBLESHOOTING.md](TROUBLESHOOTING.md) — common fixes
+- [docs/SAFETY.md](SAFETY.md) — safety notes
+- [GitHub issues](https://github.com/melynkhael/x-tool/issues) — bug
+  reports (never include cookies in an issue)
