@@ -40,6 +40,7 @@ from .discovery import (
 )
 from .filters import FilterOpts, apply_filter, classify, load_keep_ids, parse_created_at
 from .parser import iter_likes, iter_tweets, read_jsonl, write_jsonl
+from .resolver import ResolveStats, ResolverError, iter_live_retweets, resolve_screen_name
 
 
 COOKIES_PATH = Path(os.path.expanduser("~/.xtool/cookies.json"))
@@ -204,8 +205,105 @@ def cmd_login(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
-# subcommand: discover
+# subcommand: resolve-retweets
 # ---------------------------------------------------------------------------
+def cmd_resolve_retweets(args: argparse.Namespace) -> int:
+    """Fetch live profile timeline, extract source ids for every retweet,
+    write a JSONL the ``unretweet`` subcommand can consume."""
+    # Load creds (unlike delete/unretweet, we always need them here --
+    # there's no dry-run because we're just reading, never mutating).
+    creds = _load_credentials(args)
+    if creds is None:
+        console.print(
+            "[red]no credentials found.[/red] Run [cyan]xtool login[/cyan] "
+            "or pass [cyan]--auth-token[/cyan] and [cyan]--ct0[/cyan]."
+        )
+        return 2
+
+    session = build_session(creds)
+
+    # Resolve the handle -> numeric user id. If --user-id was passed,
+    # trust it; otherwise look it up.
+    user_id = args.user_id
+    handle = args.handle.lstrip("@") if args.handle else None
+    if not user_id:
+        if not handle:
+            console.print(
+                "[red]either --handle or --user-id is required[/red]"
+            )
+            return 2
+        console.print(f"[dim]resolving @{handle} -> user_id ...[/dim]")
+        try:
+            user_id = resolve_screen_name(session, handle, offline=args.offline)
+        except ResolverError as exc:
+            console.print(f"[red]{exc}[/red]")
+            return 2
+        except ActionError as exc:
+            console.print(f"[red]{exc}[/red]")
+            return 2
+        console.print(f"[green]@{handle}[/green] = user_id [bold]{user_id}[/bold]")
+
+    out_path = Path(args.output) if args.output else Path("live-retweets.jsonl")
+
+    console.print(
+        f"[bold]Walking timeline[/bold] user_id={user_id}  "
+        f"max={args.max_tweets}  page_size={args.page_size}  "
+        f"rate={args.rate}/s  out={out_path}"
+    )
+
+    count = 0
+    stats: ResolveStats | None = None
+
+    def on_page(s: ResolveStats) -> None:
+        # Light, incremental feedback -- one line per page.
+        console.print(
+            f"[dim]page {s.pages_fetched}: entries_seen={s.entries_seen}  "
+            f"retweets_found={s.retweets_found}[/dim]"
+        )
+
+    try:
+        with out_path.open("w", encoding="utf-8") as fh:
+            for rt in iter_live_retweets(
+                session,
+                user_id,
+                max_tweets=args.max_tweets,
+                page_size=args.page_size,
+                rate=args.rate,
+                offline=args.offline,
+                on_page=on_page,
+            ):
+                fh.write(json.dumps(rt, ensure_ascii=False) + "\n")
+                fh.flush()
+                count += 1
+    except (ResolverError, ActionError) as exc:
+        console.print(f"\n[red]resolver aborted:[/red] {exc}")
+        if count:
+            console.print(
+                f"[yellow]partial output: {count} retweets saved to "
+                f"{out_path}[/yellow]"
+            )
+        return 2
+
+    console.print(
+        f"\n[bold green]done[/bold green]  retweets_found={count}  "
+        f"-> {out_path}"
+    )
+    if count == 0:
+        console.print(
+            "[yellow]no retweets found in the live timeline.[/yellow] "
+            "If you have reposts visible on your profile, double-check "
+            "the handle/user_id. You can also run with a larger "
+            "--max-tweets if your timeline has a lot of originals first."
+        )
+        return 1
+    console.print(
+        f"\nNext step:\n"
+        f"  [cyan]xtool unretweet {out_path} --rate 1 "
+        f"--expect-account {handle or '<your_handle>'}[/cyan]"
+    )
+    return 0
+
+
 def cmd_discover(args: argparse.Namespace) -> int:
     sources = discover_with_sources(refresh=args.refresh, offline=args.offline)
     table = Table(title="GraphQL query IDs", show_header=True, header_style="bold")
@@ -601,6 +699,45 @@ def build_parser() -> argparse.ArgumentParser:
     # login
     sp = sub.add_parser("login", help="store X cookies in ~/.xtool/cookies.json")
     sp.set_defaults(func=cmd_login)
+
+    # resolve-retweets
+    sp = sub.add_parser(
+        "resolve-retweets",
+        help=(
+            "walk your live profile timeline and write a JSONL of "
+            "source tweet ids ready for 'xtool unretweet'"
+        ),
+    )
+    sp.add_argument("--handle", help="your X @screen_name")
+    sp.add_argument(
+        "--user-id",
+        help="numeric user id (skips the @handle lookup)",
+    )
+    sp.add_argument(
+        "-o", "--output",
+        help="output JSONL (default live-retweets.jsonl)",
+    )
+    sp.add_argument("--auth-token", help="X auth_token cookie")
+    sp.add_argument("--ct0", help="X ct0 cookie (CSRF)")
+    sp.add_argument("--cookies-file", help=f"override default {COOKIES_PATH}")
+    sp.add_argument(
+        "--max-tweets", type=int, default=10000,
+        help="walk at most this many timeline entries (default 10000)",
+    )
+    sp.add_argument(
+        "--page-size", type=int, default=40,
+        help="UserTweets count per page (default 40, X's max)",
+    )
+    sp.add_argument(
+        "--rate", type=float, default=1.0,
+        help="pages/sec (default 1)",
+    )
+    sp.add_argument(
+        "--offline",
+        action="store_true",
+        help="don't fetch x.com to auto-discover query ids; use cache/fallback",
+    )
+    sp.set_defaults(func=cmd_resolve_retweets)
 
     # discover
     sp = sub.add_parser(
