@@ -12,9 +12,8 @@ Flow:
     2. Paginate ``UserTweets`` with ``cursor`` until the bottom cursor
        stops advancing or we hit ``max_tweets``.
     3. Walk the timeline entries. Every entry whose tweet_results carries
-       a ``legacy.retweeted_status_result`` (or whose legacy.full_text
-       starts with ``RT @``) is one of *our* retweets -- emit the source
-       tweet's ``rest_id``.
+       one of our "this is a repost" signals is emitted with the source
+       tweet id (see :func:`_extract_retweet`).
 
 Each yielded dict has this shape::
 
@@ -29,6 +28,23 @@ Each yielded dict has this shape::
 
 All network errors are surfaced as :class:`ResolverError` with enough
 context for the CLI to show an actionable message.
+
+Timeline shape notes (May 2026):
+    - Recent reposts appear as top-level ``TimelineTimelineItem`` entries
+      whose ``tweet_results.result.legacy.retweeted_status_result`` points
+      to the original tweet.
+    - Older reposts (profile timeline > a few months old) are grouped
+      into ``TimelineTimelineModule`` entries with several ``items[]``
+      under ``content.items``. Each module item has its own
+      ``itemContent`` carrying a ``tweet_results`` node.
+    - Some older reposts surface as the ORIGINAL tweet with a
+      ``socialContext`` of type ``SocialContextSelfRepost`` / ``TimelineGeneralContext``
+      indicating "You reposted" ("Anda memposting ulang") -- there is
+      no ``retweeted_status_result`` in that case. We treat the entry's
+      own ``rest_id`` as the source id.
+    - Cursor entries may arrive inside a ``TimelineReplaceEntry``
+      instruction instead of ``TimelineAddEntries``, especially when
+      paginating older content. We scan every instruction for cursors.
 """
 
 from __future__ import annotations
@@ -36,7 +52,8 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import dataclass
-from typing import Any, Iterator
+from pathlib import Path
+from typing import Any, Callable, Iterator
 
 import requests
 
@@ -240,50 +257,117 @@ def resolve_screen_name(
     return str(rest_id)
 
 
-def _extract_retweet(entry: dict) -> dict | None:
-    """If this timeline entry is one of our retweets, return the
-    normalized dict. Otherwise return None.
+# --- Repost detection helpers -------------------------------------------
+
+# Known socialContext types that indicate "you reposted this" on the
+# profile timeline. X uses different strings across locales/versions.
+_REPOST_CONTEXT_TYPES: frozenset[str] = frozenset(
+    {
+        "SocialContextSelfRepost",
+        "SelfRepost",
+        "TimelineGeneralContext",  # older shape, paired with contextType
+    }
+)
+_REPOST_CONTEXT_VALUES: frozenset[str] = frozenset(
+    {"SelfRepost", "Retweet", "Reposted"}
+)
+
+
+def _unwrap_tweet_result(result: dict) -> dict:
+    """Unwrap ``TweetWithVisibilityResults`` -> inner ``tweet`` dict.
+
+    Returns the input unchanged if it's already a plain ``Tweet`` / has
+    no wrapper.
     """
-    # The timeline entry shape is:
-    # entry.content.itemContent.tweet_results.result.{legacy, rest_id}
-    content = entry.get("content") or {}
-    item = content.get("itemContent") or {}
-    tweet_results = item.get("tweet_results") or {}
-    result = tweet_results.get("result") or {}
-    # "TweetWithVisibilityResults" wraps the actual tweet one level deeper.
+    if not isinstance(result, dict):
+        return {}
     if result.get("__typename") == "TweetWithVisibilityResults":
-        result = result.get("tweet") or {}
+        return result.get("tweet") or {}
+    return result
+
+
+def _is_self_repost_context(item_content: dict) -> bool:
+    """True if the item's socialContext block says 'you reposted this'."""
+    sc = item_content.get("socialContext") or {}
+    if not isinstance(sc, dict):
+        return False
+    if sc.get("type") in _REPOST_CONTEXT_TYPES:
+        # TimelineGeneralContext needs the contextType to disambiguate
+        # from replies / pinned / etc.
+        if sc.get("type") == "TimelineGeneralContext":
+            return (sc.get("contextType") in _REPOST_CONTEXT_VALUES)
+        return True
+    # Some builds nest it one level deeper under 'socialContext.result'.
+    inner = sc.get("result") if isinstance(sc.get("result"), dict) else {}
+    if inner.get("type") in _REPOST_CONTEXT_TYPES:
+        return True
+    return False
+
+
+def _extract_retweet(entry_or_item: dict) -> dict | None:
+    """If this timeline item is one of our retweets, return the
+    normalized dict. Otherwise return None.
+
+    Accepts either:
+      - a top-level entry whose ``content.itemContent`` carries the tweet
+      - a module item whose ``item.itemContent`` carries the tweet
+    """
+    # Locate the itemContent regardless of whether we're looking at a
+    # top-level TimelineTimelineItem (entry.content.itemContent) or a
+    # module item (entry.item.itemContent).
+    content = entry_or_item.get("content") or entry_or_item.get("item") or {}
+    item_content = content.get("itemContent") or {}
+    if not item_content or item_content.get("itemType") not in (
+        "TimelineTweet",
+        None,
+    ):
+        return None
+
+    tweet_results = item_content.get("tweet_results") or {}
+    result = _unwrap_tweet_result(tweet_results.get("result") or {})
 
     legacy = result.get("legacy") or {}
     if not legacy:
         return None
 
-    # A retweet on the profile timeline shows up as: the tweet is the
-    # ORIGINAL tweet, but with retweeted_status_result pointing back to
-    # itself from the RT wrapper. The robust signal is:
-    #   legacy.retweeted_status_result  (a dict)
-    # OR:
-    #   full_text starts with "RT @" AND retweeted_status_id_str present.
+    # Signal A: archive-style retweet wrapper with retweeted_status_result.
     rt_block = legacy.get("retweeted_status_result") or {}
-    rt_result = rt_block.get("result") or {}
-    if rt_result.get("__typename") == "TweetWithVisibilityResults":
-        rt_result = rt_result.get("tweet") or {}
-
+    rt_result = _unwrap_tweet_result(rt_block.get("result") or {})
     source_id = (
         rt_result.get("rest_id")
         or (rt_result.get("legacy") or {}).get("id_str")
         or legacy.get("retweeted_status_id_str")
     )
+
+    source_legacy: dict = rt_result.get("legacy") or {}
+    source_rt_result: dict = rt_result
+
+    # Signal B: profile timeline self-repost -- the entry is the ORIGINAL
+    # tweet, with a socialContext saying "you reposted". The source id
+    # is the tweet's own rest_id (which is the correct input for
+    # DeleteRetweet).
+    if not source_id and _is_self_repost_context(item_content):
+        source_id = result.get("rest_id") or legacy.get("id_str")
+        source_legacy = legacy
+        source_rt_result = result
+
+    # Signal C: legacy.retweeted == True paired with RT prefix or
+    # retweeted_status_id_str. Rare but seen on very old reposts.
+    if not source_id and legacy.get("retweeted") and (
+        legacy.get("retweeted_status_id_str")
+        or str(legacy.get("full_text", "")).startswith("RT @")
+    ):
+        source_id = legacy.get("retweeted_status_id_str") or result.get("rest_id")
+        source_legacy = legacy
+        source_rt_result = result
+
     if not source_id:
-        # Not a retweet.
         return None
 
-    source_legacy = rt_result.get("legacy") or {}
+    # Best-effort: original author's handle.
     source_user = None
-    # Try to surface the original author's handle for the filter/dry-run
-    # banner; this is best-effort.
     try:
-        src_core = (rt_result.get("core") or {}).get("user_results") or {}
+        src_core = (source_rt_result.get("core") or {}).get("user_results") or {}
         src_user = (src_core.get("result") or {}).get("legacy") or {}
         source_user = src_user.get("screen_name")
     except (KeyError, TypeError):
@@ -299,29 +383,96 @@ def _extract_retweet(entry: dict) -> dict | None:
     }
 
 
-def _walk_entries(
-    instructions: list[dict],
-) -> Iterator[tuple[dict, str | None]]:
-    """Yield ``(entry, bottom_cursor)`` tuples from a UserTweets response.
+# --- Instruction / entry traversal --------------------------------------
 
-    The response is a list of instructions of which exactly one is
-    ``TimelineAddEntries``. Entries include the tweet rows and two
-    cursor entries (top/bottom).
+def _iter_tweet_items(instructions: list[dict]) -> Iterator[dict]:
+    """Yield every tweet-bearing item from a UserTweets response.
+
+    Handles all known entry shapes:
+      - ``TimelineTimelineItem``       (top-level single tweet)
+      - ``TimelineTimelineModule``     (grouped list of tweets, used for
+        older profile entries + conversations)
+      - ``TimelineAddToModule``        (pagination: additional items
+        appended to an existing module on later pages)
     """
-    bottom_cursor: str | None = None
     for instr in instructions:
-        if instr.get("type") != "TimelineAddEntries":
-            continue
-        for entry in instr.get("entries") or []:
-            content = entry.get("content") or {}
-            entry_type = content.get("entryType") or content.get("__typename")
-            if entry_type == "TimelineTimelineCursor" and content.get(
-                "cursorType"
-            ) == "Bottom":
-                bottom_cursor = content.get("value")
-                continue
-            # "TimelineTimelineItem" is the tweet row we want.
-            yield entry, bottom_cursor
+        itype = instr.get("type")
+
+        if itype == "TimelineAddEntries":
+            for entry in instr.get("entries") or []:
+                yield from _iter_items_in_entry(entry)
+
+        elif itype == "TimelineAddToModule":
+            # Module extension. Items live directly under
+            # instruction.moduleItems[].item.itemContent.
+            for mitem in instr.get("moduleItems") or []:
+                yield mitem
+
+
+def _iter_items_in_entry(entry: dict) -> Iterator[dict]:
+    """Yield every tweet item found inside a single timeline entry."""
+    content = entry.get("content") or {}
+    etype = content.get("entryType") or content.get("__typename")
+
+    if etype == "TimelineTimelineItem":
+        yield entry
+        return
+
+    if etype == "TimelineTimelineModule":
+        # content.items is a list of {"entryId": "...", "item": {...}}
+        for mitem in content.get("items") or []:
+            yield mitem
+        return
+
+    # Cursor entries & anything else -- skip.
+
+
+def _find_bottom_cursor(instructions: list[dict]) -> str | None:
+    """Scan every instruction for a Bottom timeline cursor.
+
+    Cursors can arrive under:
+      - ``TimelineAddEntries`` entries whose content is a
+        ``TimelineTimelineCursor`` with ``cursorType=Bottom``
+      - ``TimelineReplaceEntry`` instructions replacing the bottom
+        cursor entry (common on pages 2+)
+      - Inside a ``TimelineTimelineModule.content.items[].item`` whose
+        itemContent is a cursor (older profile pagination)
+    """
+    def _extract_cursor_from_content(content: dict) -> str | None:
+        if not isinstance(content, dict):
+            return None
+        if (
+            (content.get("entryType") == "TimelineTimelineCursor"
+             or content.get("__typename") == "TimelineTimelineCursor")
+            and content.get("cursorType") == "Bottom"
+        ):
+            return content.get("value") or None
+        # Module-wrapped cursor item.
+        ic = content.get("itemContent") or {}
+        if ic.get("itemType") == "TimelineTimelineCursor" and ic.get(
+            "cursorType"
+        ) == "Bottom":
+            return ic.get("value") or None
+        return None
+
+    for instr in instructions:
+        itype = instr.get("type")
+        if itype == "TimelineAddEntries":
+            for entry in instr.get("entries") or []:
+                c = _extract_cursor_from_content(entry.get("content") or {})
+                if c:
+                    return c
+                # Cursors can also hide inside module items.
+                for mitem in (entry.get("content") or {}).get("items") or []:
+                    c = _extract_cursor_from_content(mitem.get("item") or {})
+                    if c:
+                        return c
+        elif itype == "TimelineReplaceEntry":
+            entry = instr.get("entry") or {}
+            c = _extract_cursor_from_content(entry.get("content") or {})
+            if c:
+                return c
+    return None
 
 
 def iter_live_retweets(
@@ -332,7 +483,8 @@ def iter_live_retweets(
     page_size: int = 40,
     rate: float = 1.0,
     offline: bool = False,
-    on_page: callable | None = None,
+    on_page: Callable[["ResolveStats"], None] | None = None,
+    debug_path: str | Path | None = None,
 ) -> Iterator[dict]:
     """Stream retweets from a user's live profile timeline.
 
@@ -341,80 +493,109 @@ def iter_live_retweets(
         page_size: UserTweets ``count`` variable (X caps at 40).
         rate: pages per second; 1.0 is conservative and safe.
         on_page: callback ``f(stats)`` after each page.
+        debug_path: if set, raw timeline instructions for every page
+            where ``entries_seen > 0`` but ``retweets_found == 0`` are
+            appended as JSONL for post-mortem debugging.
     """
     stats = ResolveStats()
     cursor: str | None = None
     interval = 1.0 / rate if rate > 0 else 0.0
     seen_source: set[str] = set()
+    debug_fh = None
+    if debug_path is not None:
+        debug_fh = Path(debug_path).open("w", encoding="utf-8")
 
-    while stats.entries_seen < max_tweets:
-        variables: dict[str, Any] = {
-            "userId": str(user_id),
-            "count": int(page_size),
-            "includePromotedContent": False,
-            "withQuickPromoteEligibilityTweetFields": False,
-            "withVoice": False,
-            "withV2Timeline": True,
-        }
-        if cursor:
-            variables["cursor"] = cursor
+    try:
+        while stats.entries_seen < max_tweets:
+            variables: dict[str, Any] = {
+                "userId": str(user_id),
+                "count": int(page_size),
+                "includePromotedContent": False,
+                "withQuickPromoteEligibilityTweetFields": False,
+                "withVoice": False,
+                "withV2Timeline": True,
+            }
+            if cursor:
+                variables["cursor"] = cursor
 
-        body = _gql_get(
-            session,
-            "UserTweets",
-            variables=variables,
-            features=_USER_TWEETS_FEATURES,
-            field_toggles=_USER_TWEETS_FIELD_TOGGLES,
-            offline=offline,
-        )
-        stats.pages_fetched += 1
-
-        try:
-            instructions = (
-                body["data"]["user"]["result"]["timeline_v2"]["timeline"][
-                    "instructions"
-                ]
+            body = _gql_get(
+                session,
+                "UserTweets",
+                variables=variables,
+                features=_USER_TWEETS_FEATURES,
+                field_toggles=_USER_TWEETS_FIELD_TOGGLES,
+                offline=offline,
             )
-        except (KeyError, TypeError):
-            # Some accounts return timeline instead of timeline_v2.
+            stats.pages_fetched += 1
+
             try:
                 instructions = (
-                    body["data"]["user"]["result"]["timeline"]["timeline"][
+                    body["data"]["user"]["result"]["timeline_v2"]["timeline"][
                         "instructions"
                     ]
                 )
             except (KeyError, TypeError):
-                raise ResolverError(
-                    "UserTweets: unexpected response shape: "
-                    f"{str(body)[:300]}"
+                # Some accounts return timeline instead of timeline_v2.
+                try:
+                    instructions = (
+                        body["data"]["user"]["result"]["timeline"]["timeline"][
+                            "instructions"
+                        ]
+                    )
+                except (KeyError, TypeError):
+                    raise ResolverError(
+                        "UserTweets: unexpected response shape: "
+                        f"{str(body)[:300]}"
+                    )
+
+            page_entries = 0
+            page_retweets = 0
+            for item in _iter_tweet_items(instructions):
+                page_entries += 1
+                stats.entries_seen += 1
+                rt = _extract_retweet(item)
+                if rt is None:
+                    continue
+                # Dedup on source id in case the user retweeted the
+                # same source more than once (rare but possible).
+                if rt["id_str"] in seen_source:
+                    continue
+                seen_source.add(rt["id_str"])
+                page_retweets += 1
+                stats.retweets_found += 1
+                yield rt
+
+            new_cursor = _find_bottom_cursor(instructions)
+
+            # Dump the page when we saw entries but found no retweets,
+            # to help diagnose schema drift.
+            if debug_fh is not None and page_entries > 0 and page_retweets == 0:
+                debug_fh.write(
+                    json.dumps(
+                        {
+                            "page": stats.pages_fetched,
+                            "cursor_in": cursor,
+                            "cursor_out": new_cursor,
+                            "entries_on_page": page_entries,
+                            "instructions": instructions,
+                        },
+                        ensure_ascii=False,
+                    )
+                    + "\n"
                 )
+                debug_fh.flush()
 
-        new_cursor: str | None = None
-        had_entry = False
-        for entry, bottom in _walk_entries(instructions):
-            had_entry = True
-            stats.entries_seen += 1
-            if bottom:
-                new_cursor = bottom
-            rt = _extract_retweet(entry)
-            if rt is None:
-                continue
-            # Dedup on source id in case the user retweeted the same
-            # source more than once (rare but possible).
-            if rt["id_str"] in seen_source:
-                continue
-            seen_source.add(rt["id_str"])
-            stats.retweets_found += 1
-            yield rt
+            if on_page:
+                on_page(stats)
 
-        if on_page:
-            on_page(stats)
+            # Terminate when the cursor stops advancing or the page had
+            # no content at all.
+            if page_entries == 0 or not new_cursor or new_cursor == cursor:
+                break
+            cursor = new_cursor
 
-        # Terminate when the cursor stops advancing or the page had no
-        # content at all.
-        if not had_entry or not new_cursor or new_cursor == cursor:
-            break
-        cursor = new_cursor
-
-        if interval:
-            time.sleep(interval)
+            if interval:
+                time.sleep(interval)
+    finally:
+        if debug_fh is not None:
+            debug_fh.close()
